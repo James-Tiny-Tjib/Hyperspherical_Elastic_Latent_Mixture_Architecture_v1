@@ -384,10 +384,10 @@ class CheckpointDriver:
         # Try to take the repo file's file paths
         repo_files = None
         try:
-            repo_files = self.api.list_repo_files(repo_id = self.checkpoint_config.model_repo_id)
+            repo_files = list(self.api.list_repo_files(repo_id = self.checkpoint_config.model_repo_id))
         except RepositoryNotFoundError:
-            print(f"❌ Repo: \"{self.checkpoint_config.model_repo_id}\" was not found when trying to update deletion status")
-            return
+            raise RepositoryNotFoundError(f"❌ Repo: \"{self.checkpoint_config.model_repo_id}\" was not found when trying to update deletion status")
+            
 
         # Loop Through every checkpoint and switch the status if necessary
         for ckpt_vals in training_state["checkpoints"].values():
@@ -510,12 +510,14 @@ class CheckpointDriver:
                 valid_steps.append(int(step))
         
         # Print messege and return 0 if its brand new
-        if not valid_steps and self.rank == 0:
-            print("According to the training_state, every single checkpoint is invalid or deleted. Starting from ground 0")
+        if not valid_steps:
+            if self.rank == 0:
+                print("According to the training_state, every single checkpoint is invalid or deleted. Starting from ground 0")
             # return 0,0
+            self.actual_resume_step = 0
             return {
                 "curriculum_level": 0,
-                "examples_processed_at_curr_level": 0,
+                "rows_processed_at_curr_level": 0,
                 "total_tokens_processed_global": 0,
                 "total_rows_processed_global": 0,  
             }, 0
@@ -607,7 +609,7 @@ class CheckpointDriver:
         # Ensure to use module or not to ensure compatibility
         save_dict = {
             "model_state": model.module.state_dict() if hasattr(model, "module") else model.state_dict(),
-            "optimizer": optimizer.state_dict() 
+            "optimizer_state": optimizer.state_dict() 
         }
 
         # Save using TPU or GPU .save()
@@ -619,7 +621,7 @@ class CheckpointDriver:
 
         # If more than 1 worker, end barrier
         if self.world_size > 1:
-            self._smart_barrier("save_end")
+            self._smart_barrier("save_weights_end")
 
         # Update training_state (add checkpoint entry + update metadata)
         # Only let rank 0 change the state of the UPLOAD_REQUEST.json to ping the sidecar
@@ -647,17 +649,22 @@ class CheckpointDriver:
                 json.dump(self.training_state, f, indent = 4)
 
             # Ping sidecar by updating UPLOAD_REQUEST.json
-            request_data = {"file_to_upload": filename, "step": global_step}
-            with open("UPLOAD_REQUEST.json.tmp", "w") as f:
+            request_data = {
+                "file_to_upload": filename, 
+                "step": global_step,
+                "training_state_snapshot": self.training_state
+            }
+
+            with open(f"UPLOAD_REQUEST_{global_step}.json.tmp", "w") as f:
                 json.dump(request_data, f)
-            os.rename("UPLOAD_REQUEST.json.tmp", "UPLOAD_REQUEST.json")
+            os.rename(f"UPLOAD_REQUEST_{global_step}.json.tmp", f"UPLOAD_REQUEST_{global_step}.json")
             
             # Print some bs idk lol
             print(f"Saved weights to local disk + updated training_state.json. Pinging Sidecar for Step{global_step}")
 
         # If more than 1 worker make sure other ranks wait for rank 0
         if self.world_size > 1:
-            self._smart_barrier("save_end")   
+            self._smart_barrier("save_training_state_end")   
 
 
 
@@ -898,8 +905,8 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                             optimizer = optimizer, 
                             global_step = global_step, 
                             hardware_string = hw_config.hardware_string,
-                            metrics: {
-                                "Total Loss" :  rount(total_loss.item()*hw_config.grad_accum_steps,5),
+                            metrics = {
+                                "Total Loss" :  round(total_loss.item()*hw_config.grad_accum_steps,5),
                                 "CE Loss" : round(ce_loss.item(),5),
                                 "AUX Loss" : round(aux_loss.item(),5),
                                 "Sparsity" : round(sparsity_loss.item(),5)
@@ -999,59 +1006,72 @@ def sidecar_uploader_loop(hf_token, repo_id):
 
     # Forever Loop to constantly check
     while True:
-
-        # Check if UPLOAD_REQUEST.json exists
-        # If so, the model successfully saved in the runtime and now we need to upload it to HF
-        if os.path.exists("UPLOAD_REQUEST.json"):
+        
+        # Check to see if any valid upload requests exist & take the step size
+        upload_requests = []
+        for file in os.listdir("."):
+            if file.startswith("UPLOAD_REQUEST_") and file.endswith(".json"):
+                upload_requests.append(int(file.replace("UPLOAD_REQUEST_", "").replace(".json", "")))
+        
+        # Sort the list and take the first request
+        if upload_requests:
             
+            # Get the next upload_request and process that first
+            next_upload = sorted(upload_requests)[0]
+            upload_request_filename = f"UPLOAD_REQUEST_{next_upload}.json"
 
-            # Try to upload the file
+            # Try to upload the model and training_state.json to HF HUB
             try:
                 
                 # Open the UPLOADER_REQUEST.json
-                with open("UPLOAD_REQUEST.json", "r") as f:
+                with open(upload_request_filename, "r") as f:
                     UPLOAD_REQUEST = json.load(f)
                 
                 # Get filename and the step
-                filename = UPLOAD_REQUEST["file_to_upload"]
+                model_filename = UPLOAD_REQUEST["file_to_upload"]
                 step = UPLOAD_REQUEST["step"]
+                training_state_snapshot = UPLOAD_REQUEST["training_state_snapshot"]
 
                 # Print Messeage
-                print(f"⏳ Attempting to upload {filename} to {repo_id}")
+                print(f"⏳ Attempting to upload {model_filename} to {repo_id}")
 
-                # Upload the model first (most unstable)
-                if os.path.exists(filename):
+                # Upload the model first (most unstable action to do before uplaoding the .json)
+                if os.path.exists(model_filename):
                     api.upload_file(
-                        path_or_fileobj=filename,
-                        path_in_repo=filename,
+                        path_or_fileobj=model_filename,
+                        path_in_repo=model_filename,
                         repo_id=repo_id,
                         repo_type="model"
                     )
                 else:
-                    print(f"❌ Failed to Upload. UPLOAD_REQUEST.json was pinged, but {filename} does not exist")
+                    print(f"❌ Failed to Upload. {upload_request_filename} was pinged, but {model_filename} does not exist")
+
+                # Dump the snapshot's training state to a temporary .json
+                with open(f"uploading_training_state.json", "w") as f:
+                    json.dump(training_state_snapshot, f)
                 
                 # Upload the training_state.json
-                if os.path.exists("training_state.json"):
-                    api.upload_file(
-                        path_or_fileobj="training_state.json",
-                        path_in_repo="training_state.json",
-                        repo_id=repo_id,
-                        repo_type="model"
-                    )
-                else:
-                    print(f"❌ Failed to Upload. training_state.json does not exist yet")
+                api.upload_file(
+                    path_or_fileobj="uploading_training_state.json",
+                    path_in_repo="training_state.json",
+                    repo_id=repo_id,
+                    repo_type="model"
+                )
+                
 
                 # Squash History to ensure that the repo doesn't hold onto the archives
                 api.super_squash_history(repo_id=repo_id)
 
-                # Remove the current checkpoint and UPLOAD_REQUEST.json
-                os.remove(filename)
-                os.remove("UPLOAD_REQUEST.json")
+                # Remove the current checkpoint and UPLOAD_REQUEST_XXXXXX.json, and uploading_training_state.json
+                os.remove(model_filename)
+                os.remove(upload_request_filename)
+                os.remove("uploading_training_state.json")
 
-                print(f"✅ Successfully uploaded {filename} @ step {step} to {repo_id}")
+                print(f"✅ Successfully uploaded {model_filename} @ step {step} to {repo_id}")
 
             except Exception as e:
-                print("❌ Failed to upload to HF. Trying again in 5 seconds...")
+                print(f"❌ Failed to upload to HF: {e}")
+                print("Trying again in 5 seconds...")
 
         # Pause 5 seconds before rechecking if UPLOAD_REQUEST.json exists
         time.sleep(5)
@@ -1089,12 +1109,24 @@ if __name__ == "__main__":
         print("🔪 Initiating Termination Sequence...")
 
         # Ensure Sidecar finishes before termiantion
-        if os.path.exists("UPLOAD_REQUEST.json"):
-            print("⏳ Sidecar is currently processing a final upload. Waiting for it to finish...")
-            
-            # Hold the main script open until the Sidecar deletes the file
-            while os.path.exists("UPLOAD_REQUEST.json"):
-                time.sleep(2)
+        time_count = 0
+        while True:
+            still_uploading = False
+            for file in os.listdir("."):
+                if file.startswith("UPLOAD_REQUEST_") and file.endswith(".json"):
+
+                    if time_count % 60 == 0:
+                        print(f"⏳ Sidecar is currently processing a final upload. Waiting for it to finish...")
+                        print(f"Elapsed Time: {time_count//60} minute(s)")
+
+                    still_uploading = True
+                    break
+
+            if not still_uploading:
+                break
+
+            time.sleep(5)
+            time_count +=5
         
         # Terminate Sidecars
         uploader_process.terminate()

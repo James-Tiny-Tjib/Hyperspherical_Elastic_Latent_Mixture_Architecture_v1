@@ -83,6 +83,12 @@ Created this log to help me document what is happening
     SOLUTION: Delete metadata logic. Each checkpoint will each contain all the information inside each checkpoint value
     Updated Checkpoint Driver to remove Metadata Logic
     Started Fixing train_worker
+
+4/8 (4 Hours):
+    Fixed train_worker - now successfully uploads the files to the HF Hub
+    Created Repo to ensure my stuff doesn't get lost
+    Created "Upload Queue" structure to allow for multiple upload requests if training the model was faster than the uploading
+    
     
     
 
