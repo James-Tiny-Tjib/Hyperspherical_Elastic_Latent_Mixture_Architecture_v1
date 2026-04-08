@@ -1,0 +1,66 @@
+{
+  "metadata": {
+    "project_name": "HELM-10B-Run",
+    "total_tokens_processed_global": 1500000000,
+    "current_curriculum_level": 1,
+    "latest_step": 14600,
+    "best_step": 14500
+  },
+  "checkpoints": {
+    "100": {
+      "status": "deleted",
+      "file": null,
+      "curriculum_level": 0,
+      "hardware": "p100",
+      "metrics": {
+        "total_loss": 8.4,
+        "ce_loss": 8.1,
+        "aux_loss": 0.2,
+        "sparsity_loss": 0.1
+      },
+      "timestamp": "2026-03-26T08:00:00Z"
+    },
+    "5000": {
+      "status": "milestone",
+      "file": "checkpoint-5000.pt",
+      "curriculum_level": 0,
+      "hardware": "v5e-8",
+      "tokens_processed_this_level": 512000000,
+      "metrics": {
+        "total_loss": 5.2,
+        "ce_loss": 5.0,
+        "aux_loss": 0.15,
+        "sparsity_loss": 0.05
+      },
+      "timestamp": "2026-03-26T12:30:00Z"
+    },
+    "14500": {
+      "status": "best",
+      "file": "checkpoint-14500.pt",
+      "curriculum_level": 1,
+      "hardware": "t4*2",
+      "tokens_processed_this_level": 980000000,
+      "metrics": {
+        "total_loss": 3.1,
+        "ce_loss": 3.0,
+        "aux_loss": 0.08,
+        "sparsity_loss": 0.02
+      },
+      "timestamp": "2026-03-27T04:15:00Z"
+    },
+    "14600": {
+      "status": "latest",
+      "file": "checkpoint-14600.pt",
+      "curriculum_level": 1,
+      "hardware": "t4*2",
+      "tokens_processed_this_level": 995000000,
+      "metrics": {
+        "total_loss": 3.2,
+        "ce_loss": 3.05,
+        "aux_loss": 0.1,
+        "sparsity_loss": 0.05
+      },
+      "timestamp": "2026-03-27T05:00:00Z"
+    }
+  }
+}

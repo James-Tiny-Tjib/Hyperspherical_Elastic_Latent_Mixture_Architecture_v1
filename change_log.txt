@@ -1,0 +1,95 @@
+3/10-3/19:
+Finished HELM model.py
+    After months of learning ML theory + planning this architecture, the script has been written
+
+3/19-3/20:
+Finished prepare_data.py & tokenized 10B tokens
+    take 10B tokens from dataset "HuggingFaceFW/fineweb-edu/sample-10BT"
+    tokenized via tokenizer from "answerdotai/ModernBERT-base" 
+    learned about python generators (very similar to iterators)
+    created checkpoing alg to save shards of tokens every so often
+    created failsafes to ensure tokens don't get repeated twice
+    tokens are perfectly padded to 1024, 2048, 4096
+    ran on kaggle
+
+3/20-3/22:
+Finished the SpanMLMCollator.py
+    takes the tokens from prepare_data.py and properly apply MLM masking + span masking
+
+3/21-3/24:
+Finished Phase 1: parallel_hardware_trainer.py
+    created parallel_hardware_trainer.py, which includes all training stuff
+    HardwareConfig, MLMDataConfig, MLMDataStrategy, HardwareDriver, train_worker defined
+    runs all kaggle hardwares
+
+
+3/24:
+Retokenized everything
+    accidently deleted portions of my dataset permanently
+    overlapping may have occured
+    created proper validation sets for all seq lengths
+
+3/24-3/26:
+Finished Phase 2: Fixing Model.py + adding curriculum learning
+    fixed minor issues in the trainer program
+    added curriculum loading
+    define hardware profiles
+    added AMP (automatic mixed precision) gradient scaling so I can run more and faster
+    added gradient checkpointing (cuda only), higher batch count 
+    fixed model.py with the head selection strategy / other design choices for different hardwares
+
+3/27-3/29:
+Starting Phase 3: Adding Checkpointing System:
+    Added new config: CheckpointConfig (includes checkpointing info)
+    Defined / Finalized training_state.json format
+    Added to create the init, parsing .jsons from HF, saving, etc
+    Added load checkpointing (sorta vibe-coded)
+
+3/30:
+Continuing Phase 3: Finished Checkpoint Driver Class (added save_checkpoint)
+    Updates metadata
+    Updates training_state.json
+    Saves the model (hardware agnostic)
+    pings the sidecar via UPLOADER_REQUEST.json adjustment
+
+3/31 (2 Hours):
+Continuing Phase 3: Included Exclusive Attention Toggle (in config as well):
+The Mathematical Formula:
+    If y_i is the output of standard self-attention for position i, and v_i is the self-value vector, 
+    the exclusive output z_i is defined by subtracting the projection of y_i onto v_i:
+    z_i = y_i - proj(y onto v)
+    By removing this component, z_i becomes mathematically orthogonal to v_i, ensuring the attention layer 
+    only passes on information that the token didn't already "know" about itself.
+ 
+Rethought the excessive normalization in the router:
+    normalizing before the sigmoid selection reduces the magnitude / volume is BAD
+    reason: sigmoid doesn't care about the other values when calculating it's sigmoid (softmax does (via the division of the summation))
+    ngpt: Angles matter, volume (module / magnitude) is dangerous.
+    router (outside): Volume = Confidence
+    we are applying a sigmoid THRESHOLD, so like we need this to not be normalized
+    removed all normalization in the router that doesn't deal with the hidden states directly 
+    (so removed latent / classification score normalization)
+
+Created this log to help me document what is happening
+
+4/4 (2 Hours):
+    Finish Sidecar 
+    Updated Main
+    Added Back Emojis to messeges: Lwk it looks AI generated (I mean this idea is AI inspired), but man does it make debugging easier 
+
+4/7 (3 Hours):
+    Attempting to implement checkpointing logic into train_worker
+    PROBLEM: checkpoints and metadat aren't correctly synced if I deleted something, leading to errors:
+    SOLUTION: Delete metadata logic. Each checkpoint will each contain all the information inside each checkpoint value
+    Updated Checkpoint Driver to remove Metadata Logic
+    Started Fixing train_worker
+    
+    
+
+
+Goals:
+    Update train_worker
+    PUSH SHIT TO GITHUB
+    Telemetrics
+    TRAIN DIS SHIIIIII RAWWWHHHHHHHH 😈😈😈😈😈
+

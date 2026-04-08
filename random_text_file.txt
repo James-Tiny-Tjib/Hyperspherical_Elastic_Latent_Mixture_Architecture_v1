@@ -1,0 +1,1448 @@
+    # OPTIONS:
+    # [0]: "v5e-1 TPU" -> Single TPU (Direct Execution)
+    # [1]: "v5e-8 TPU" -> Single TPU (Spawn Execution)
+    # [2]: "v6e-1 TPU" -> Single TPU (Direct Execution)
+    # [3]: "T4 GPU *2" -> Multi GPU (Spawn Execution)
+    # [4]: "T4 GPU" -> Single GPU (Direct Execution)
+    # [5]: "L4 GPU" -> Single GPU (Direct Execution)
+    # [6]: "P100 GPU"  -> Single GPU (Direct Execution)
+    # [7]: "T100 GPU"  -> Single GPU (Direct Execution)
+    # [8]: "A100 GPU"  -> Single GPU (Direct Execution)
+    # [9]: "CPU"       -> CPU (Direct Execution)
+    
+    # hardware_type = [
+    #                 "v5e-1 TPU",    # 0 -> Single TPU (Direct Execution)
+    #                 "v5e-8 TPU",    # 1 -> Single TPU (Spawn Execution)
+    #                 "v6e-1 TPU",    # 2 -> Single TPU (Direct Execution)
+    #                 "T4 GPU *2",    # 3 -> Multi GPU (Spawn Execution)
+    #                 "T4 GPU",       # 4 -> Single GPU (Direct Execution)
+    #                 "L4 GPU",       # 5 -> Single GPU (Direct Execution)
+    #                 "P100 GPU",     # 6 -> Single GPU (Direct Execution)
+    #                 "T100 GPU",     # 7 -> Single GPU (Direct Execution)
+    #                 "A100 GPU",     # 8 -> Single GPU (Direct Execution)
+    #                 "CPU"           # 9 -> CPU (Direct Execution)
+    #                 ]
+
+
+    ##################################################
+# Tokenizes all the text required to train HELM v1
+# Uses ModernBert's Tokenizer
+# Takes 10B Tokens from HuggingFaceFW/fineweb-edu
+# Utilizes the sample-10BT subset
+# Um yeah, here we go
+##################################################
+
+# YAML Configuration
+# ---
+# configs:
+#   - config_name: seq_1024
+#     data_files:
+#       - split: train
+#         path: data/seq_1024/train-*.parquet
+#       - split: validation
+#         path: data/seq_1024/validation-*.parquet
+#   - config_name: seq_2048
+#     data_files:
+#       - split: train
+#         path: data/seq_2048/train-*.parquet
+#   - config_name: seq_4096
+#     data_files:
+#       - split: train
+#         path: data/seq_4096/train-*.parquet
+# ---
+
+# Note to Self:
+# Generators exist, and they are like Iterators / classes inheriting Iterable in Java
+# You can call iterators use next(), but lowkey just use a for loop
+
+# Import Libraries
+!pip install -U transformers datasets huggingface_hub tqdm pyarrow psutil
+from transformers import AutoTokenizer
+import datasets
+from datasets import load_dataset
+import torch
+from tqdm import tqdm
+import huggingface_hub
+import pyarrow
+import multiprocessing
+import math
+from itertools import chain, islice
+import json
+import os
+from huggingface_hub import hf_hub_download
+from huggingface_hub import HfApi, HfFileSystem
+from huggingface_hub.utils import RepositoryNotFoundError
+
+
+# --- CONFIGURATION FLAG ---
+VALIDATION_MODE = True  # Set to True for Run 1, False for Run 2
+VAL_SIZE = 10000        # Number of docs for validation
+# --------------------------
+
+
+# Login to HF and create repo
+hf_token = "" 
+api = HfApi(token = hf_token)
+repo_id = "JamesResearch1216/HELM-Processed-Data-10B"
+api.create_repo(repo_id = repo_id, repo_type = "dataset", exist_ok = True)
+
+progress = {
+    "last_shard" : 0,
+    "num_rows_processed": 0,
+    "num_tokens_processed": 0
+}
+
+
+# progress.json retrieval
+def retrieve_progress_from_hub(repo_id, filename = "progress.json"):
+    try:
+        path = hf_hub_download(repo_id=repo_id, filename = filename, repo_type = "dataset")
+        with open(path, "r") as f:
+            progress = json.load(f)
+        print(f"Resuming from shard {progress['last_shard']}")
+        return progress
+    except RepositoryNotFoundError:
+        print(f"Repo: \"{repo_id}\" was not found")
+        return None
+    except Exception as e:
+        print(f"No progress file found or error occurred: {e}. Starting from token zero.")
+        progress = {
+            "last_shard" : 0,
+            "num_rows_processed": 0,
+            "num_tokens_processed": 0
+        }
+        return progress
+
+
+# progress.json push
+def push_progress_to_hub(progress, repo_id, filename = "progress.json"):
+    try:
+        with open(filename, "w") as f:
+            json.dump(progress, f)
+        api.upload_file(
+            path_or_fileobj=filename,
+            path_in_repo=filename,
+            repo_id=repo_id,
+            repo_type="dataset"
+        )
+        return True
+    except Exception as e:
+        print("Error Occurred")
+        return False
+
+
+def push_shard_to_hub(shard_data, progress, repo_id, progress_file, length, api, data_split):
+    
+    next_shard = progress["last_shard"] + 1
+    try:        
+        # # Filename format exampele: data/seq_1024/train-00001.parquet
+        # filename = f"{data_split}-{next_shard:05d}.parquet"
+        # repo_path = f"data/seq_{length}/{filename}"
+
+        # # Validation and Train will be subsets (name)
+        # # Splits will be seq_1024, seq_2048, seq_4096 
+        # split_name = f"seq_{length}"
+        # filename = f"{split_name}-{next_shard:05d}.parquet"
+        # repo_path = f"data/{data_split}/{filename}"
+
+        # # seq_1024, seq_2048, seq_4096 will be subsets (name)
+        # # Splits will be train and validation
+        config_name = f"seq_{length}"
+        filename = f"{data_split}-{next_shard:05d}.parquet"
+        repo_path = f"data/{config_name}/{filename}"
+        
+        # Convert shard_data -> dictionary -> HF dataset -> .parquet
+        ds_shard = datasets.Dataset.from_dict({"input_ids": shard_data})
+        ds_shard.to_parquet(filename)
+        
+        # 2. Upload the raw file directly to the Hub
+        api.upload_file(
+            path_or_fileobj=filename,
+            path_in_repo=repo_path,
+            repo_id=repo_id,
+            repo_type="dataset"
+        )
+        
+        # 3. Clear local disk so Kaggle/Colab doesn't run out of storage
+        os.remove(filename)
+        
+
+        # Update Progress and Push to Hub
+        progress["last_shard"] = next_shard
+        push_progress_to_hub(progress, repo_id, progress_file)
+        
+        # Success Message 
+        print(f"✅ Shard {progress['last_shard']} uploaded successfully to {repo_path}.")
+        return True
+
+    except Exception as e:   
+
+        # You done messed up
+        print(f" ❌ Shard {progress['last_shard']} failed to upload")
+        return False
+
+
+# tokenization function (1 row)
+def tokenize_single_row(row):
+    tokenized_row = tokenizer(row, add_special_tokens=False)["input_ids"]
+    return tokenized_row + [tokenizer.sep_token_id]
+
+
+# Generator function to extract the text from the data_stream
+def extract_text(data_stream):
+    # Use for loop to extract the text from data_stream generator
+    for row in data_stream:
+        yield row["text"]
+
+
+# Generator Function that returns the token list
+def parallel_token_stream(data_stream, pool, progress, chunksize):
+
+    # Define Generator Object 
+    text_generator = extract_text(data_stream)
+
+    # Use i(terable)map to iterate through and tokenize single rows
+    results = pool.imap(tokenize_single_row, text_generator, chunksize=chunksize)
+
+    # Use for loop to extract tokenized lists from results
+    for token_list in results:
+        # Increment documents processed
+        progress["num_rows_processed"] += 1 
+        # Yield / return 1 token list every time
+        yield token_list
+
+
+# Generator function that pack Tokens into correct lengths
+def pack_tokens(data_chain, tokenizer, length = 1024):
+
+    # Keep running until data_chain is empty
+    while True:
+
+        # Take slices of size "length"
+        chunk = list(islice(data_chain, length-1))
+
+        # If we run out, don't yield shit
+        if (len(chunk) < length-1):
+            break
+        
+        # Yield the list with [CLS] "EOS" token
+        yield [tokenizer.cls_token_id] + chunk
+
+# Generates a Shard 
+def get_shard(packed_stream, shard_size, progress, repo_id, length, api, progress_file, split_name="train"):
+
+    # Shard Data List
+    shard_data = []
+
+    # Use For Loop on Generator from pack_tokens
+    for seq in packed_stream:
+        shard_data.append(seq)
+
+        # When shard reaches maximum size
+        if (len(shard_data) >= shard_size):
+            
+            progress["num_tokens_processed"] += len(shard_data) * length
+
+            if (push_shard_to_hub(shard_data, progress, repo_id, progress_file, length, api, split_name)):
+                return True
+            else:
+                raise Exception("run_sharding_pipeline() done_messed up")
+    
+    return False
+            
+
+if __name__ == '__main__':
+
+    PROGRESS_FILE = "val_progress.json" if VALIDATION_MODE else "train_progress.json"
+    SPLIT_NAME = "validation" if VALIDATION_MODE else "train"
+
+    # Import Tokenizer
+    tokenizer_path = "answerdotai/ModernBERT-base" 
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast = True)
+
+    # Import Dataset
+    dataset_path = "HuggingFaceFW/fineweb-edu"
+    dataset_name_path = "sample-10BT"
+    full_dataset = load_dataset(path = dataset_path, name = dataset_name_path, split = "train", streaming = True)
+
+    progress = retrieve_progress_from_hub(repo_id, PROGRESS_FILE)
+
+    if VALIDATION_MODE:
+
+        print("Creating Validation Split")
+
+        val_stream = full_dataset.take(VAL_SIZE)
+        num_cores = max(1, multiprocessing.cpu_count()-1)
+
+        # Apply Multiprocessing
+        with multiprocessing.Pool(processes=num_cores) as pool:
+
+            # Get Token Stream
+            token_stream = parallel_token_stream(val_stream, pool, progress, chunksize = 1000)
+
+            # Get Long Chain of input_ids
+            flat_chain = chain.from_iterable(token_stream)
+
+            # Pack the Chain
+            packed_stream = pack_tokens(flat_chain, tokenizer, length = 1024)
+
+            # Because validation is .1% of the data smaller than a shard (10M vs 100M)
+            # No Shard Logic. Just Run (make sure you convert packed_stream to list)
+            val_data = list(packed_stream) 
+            push_shard_to_hub(val_data, progress, repo_id, PROGRESS_FILE, length=1024, api=api, data_split=SPLIT_NAME)
+            push_progress_to_hub(progress, repo_id, PROGRESS_FILE)
+
+        print("Validation Split Completed")
+
+    else:
+
+        print("Creating Training Split")
+
+        while progress["num_tokens_processed"] < 10e9:
+
+            # Determine what length to do
+            if (progress["num_tokens_processed"] >= 9e9):
+                length = 4096
+            elif (progress["num_tokens_processed"] >= 7e9):
+                length = 2048
+            else:
+                length = 1024
+
+            shard_token_num = 1e8
+            num_sequences_in_shard = int(shard_token_num / length)
+
+            # Calculate number of cores
+            num_cores = max(1, multiprocessing.cpu_count()-1)
+        
+            # Apply Multiprocessing
+            with multiprocessing.Pool(processes=num_cores) as pool:
+                
+                # Skip section we already processed
+                train_dataset = full_dataset.skip(VAL_SIZE)
+                skipped_dataset = train_dataset.skip(progress["num_rows_processed"])
+
+                # Get Token Stream
+                token_stream = parallel_token_stream(skipped_dataset, pool, progress, chunksize = 1000)
+
+                # Get Long Chain of input_ids
+                flat_chain = chain.from_iterable(token_stream)
+
+                # Pack the Chain
+                packed_stream = pack_tokens(flat_chain, tokenizer, length)
+
+                # Process 1 Shard
+                has_more_data = get_shard(packed_stream, num_sequences_in_shard, progress, repo_id, length, api, PROGRESS_FILE, SPLIT_NAME)
+
+                # Save progress to hub
+                push_progress_to_hub(progress, repo_id, PROGRESS_FILE)
+
+                if not has_more_data:
+                    print("Dataset stream exhausted")
+                    print("Training Split Completed")
+                    break
+
+
+import os
+import sys
+import importlib
+import time
+import json
+import site
+from dataclasses import dataclass, field
+import multiprocessing
+from SpanMLMCollator import SpanMLMCollator
+from typing import Optional, List, Union, ClassVar
+import warnings
+
+# Disable Progress Bars
+try:
+    from huggingface_hub.utils import disable_progress_bars
+    disable_progress_bars()
+except ImportError:
+    pass
+
+# Ensure PJRT runtime gets selected, not XRT
+for key in ["XRT_TPU_CONFIG", "PJRT_SELECT_DEVICE", "TPU_PROCESS_ADDRESSES"]:
+    os.environ.pop(key, None)
+os.environ["PJRT_DEVICE"] = "TPU"
+# Add the framework quarantine just in case!
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["TRANSFORMERS_NO_JAX"] = "1"
+os.environ["TRANSFORMERS_NO_FLAX"] = "1"
+os.environ["TRANSFORMERS_NO_TF"] = "1"
+
+# Force Path Refresh
+if 'site' in sys.modules:
+    importlib.reload(site)
+
+
+@dataclass
+class HardwareConfig:
+    HARDWARE_PROFILES = {
+        # Key: {micro_batch, world_size, target_gbs}
+        "v5e-8":  {"mb": 16, "ws": 8, "target": 128}, # TPU Pod
+        "v5e-1":  {"mb": 16, "ws": 1, "target": 128}, # Single TPU
+        "v6e-1":  {"mb": 32, "ws": 1, "target": 128}, # Next-gen TPU
+        "t4*2":   {"mb": 8,  "ws": 2, "target": 128}, # Dual T4 (Kaggle)
+        "t4":     {"mb": 8,  "ws": 1, "target": 128}, # Single T4
+        "l4":     {"mb": 24, "ws": 1, "target": 128}, # Single L4
+        "p100":   {"mb": 16, "ws": 1, "target": 128}, # Single P100
+        "a100":   {"mb": 64, "ws": 1, "target": 128}, # Single A100
+        "cpu":    {"mb": 2,  "ws": 1, "target": 128}, # Local CPU
+    }
+    hardware_string: str = "v5e-8"
+    hf_token: str = "" 
+    base_repo_id = "JamesResearch1216/HELM-Architecture"
+    repo_ver_override: Optional[int] = None
+
+    # These will be overwritten, but just place_holders for now
+    world_size: int = 1
+    batch_size: int = 16
+    grad_accum_steps: int = 1
+    device_type: str = "cpu"
+
+
+
+@dataclass
+# This MLMDataConfig Class 
+class MLMDataConfig:
+    repo_id: str = "JamesResearch1216/HELM-Processed-Data-10B-v2"
+    curriculum: bool = True
+    curriculum_subset_names: List[str] = field(
+        default_factory=lambda: ["seq_1024", "seq_2048", "seq_4096"]
+    )
+    train_split: str = "train"
+    validation_split: str = "validation" 
+    tokenizer_name: str = "answerdotai/ModernBERT-base"
+    max_seq_len: int = 4096 
+    batch_size: int = 32
+    mlm_probability: float = 0.3
+    mlm_use_span_masking: bool = True
+    mlm_span_length: int = 3
+
+class MLMDataStrategy:
+
+    # Initialize (Different for each hardware)
+    def __init__(self, rank = 0, world_size = 1, is_tpu = False, config: Optional[MLMDataConfig] = None):
+        self.rank = rank
+        self.world_size = world_size
+        self.is_tpu = is_tpu
+        self.config = config
+    
+    # Create get_mlm_data_loader function
+    # Note: This only bascially works with the dataset created by prepare_data.py
+
+    def get_mlm_data_loader(self, collate_fn = None, curriculum_level = 0, is_train = True):
+
+        # Set up Dataset Differently for curriculum
+        if (self.config.curriculum):
+            dataset = load_dataset(
+                path = self.config.repo_id, 
+                name = self.config.curriculum_subset_names[curriculum_level], 
+                split = self.config.train_split if is_train else self.config.validation_split,
+                streaming = True
+            )
+        else:
+            # Else just load normally
+            dataset = load_dataset(
+                path = self.config.repo_id, 
+                name = self.config.dataset_subset, 
+                split = self.config.train_split if is_train else self.config.validation_split,
+                streaming = True
+            )
+
+        # IF we're Parallel Processing, Shard the Data so that each device gets a different slice of data
+        if self.world_size > 1:
+            dataset = dataset.shard(num_replicas = self.world_size, index = self.rank)
+
+        # Shuffle after you shard
+        dataset = dataset.shuffle(buffer_size = 10000)
+
+        # set workers = 0 for TPUs else actually the real number of CPU cores
+        # this was in the 1.x_model_trainer series of scripts
+        workers = 0 if self.is_tpu else max(1, multiprocessing.cpu_count()-1)
+
+        data_loader = DataLoader(
+            dataset, 
+            batch_size = self.config.batch_size, 
+            num_workers = workers, 
+            drop_last = True, 
+            pin_memory = True if torch.cuda.is_available() else False,  
+            collate_fn = collate_fn
+        )
+
+        # Return data_loader
+        return data_loader
+
+class HardwareDriver:
+
+    # Initialize Hardware
+    def __init__(self, hw_config: HardwareConfig, data_config: MLMDataConfig):
+        self.hw_config = hw_config
+        self.data_config = data_config
+        # Call _parse_hardware here
+        self._parse_hardware()
+    
+
+    def _parse_hardware(self):
+        # get hardware_string (with formatting)
+        hardware_string = self.hw_config.hardware_string.lower().replace(" ", "")
+
+        # Ensure that the hardware_string is valid
+        profile = None
+        for key in self.hw_config.HARDWARE_PROFILES:
+            if (key in hardware_string):
+                profile = self.hw_config.HARDWARE_PROFILES[key]
+                break
+
+        # Default to cpu if none were matching
+        if not profile:
+            profile = self.hw_config.HARDWARE_PROFILES["cpu"]
+            warnings.warn("hardware_string did not match any in HARDWARE_PROFILES. Using \"cpu\"", UserWarning)
+
+        # Add attributes to config
+        # get num_workers
+        self.hw_config.world_size = profile["ws"]
+        # define # of microbatches to equate to batch_size = 128
+        # (used during gradient accumulation)
+        self.hw_config.batch_size = profile["mb"]
+        self.data_config.batch_size = profile["mb"]
+
+        # Calculate gradient accumulation steps to get to target batch_size (128)
+        target = profile["target"]
+        self.hw_config.grad_accum_steps = max(1, target // (profile["mb"] * profile["ws"]))
+
+        # Get device type (save to hw_config)
+        if "tpu" in hardware_string:
+            self.hw_config.device_type = "tpu"
+        elif any(x in hardware_string for x in ["gpu", "cuda", "a100", "t4", "l4"]):
+            self.hw_config.device_type = "cuda"
+        else:
+            self.hw_config.device_type = "cpu"
+    
+    # Launch function: Spawn all the workers and make them run the worker_function
+    def launch(self, worker_fn):
+
+        # Define these for convience
+        world_size = self.hw_config.world_size
+        device = self.hw_config.device_type
+        
+        # If parallel processing
+        if world_size > 1:
+            if device == "tpu":
+                import torch_xla.distributed.xla_multiprocessing as xmp
+                xmp.spawn(worker_fn, args=(self.hw_config, self.data_config), start_method='spawn')
+            elif device == "cuda":
+                import random
+                import torch.multiprocessing as mp
+                
+                # Set up Multi-GPU network
+                os.environ['MASTER_ADDR'] = 'localhost'
+                os.environ['MASTER_PORT'] = str(random.randint(10001, 19999))
+
+
+                mp.spawn(worker_fn, args=(self.hw_config, self.data_config), nprocs=ws)
+        else:
+            # Single Device Execution (Rank 0)
+            worker_fn(0, self.hw_config, self.data_config)
+
+
+
+def train_worker(rank, hw_config, data_config):
+
+    # Lazy Loading for Kaggle Support
+    sys.modules['tensorflow'] = None
+    import traceback
+
+    try:
+        # Even more lazy loading to get the right version of torch
+        import torch
+        import torch.optim as optim
+        # Import Custom Collator
+        import SpanMLMCollator
+        
+        # TEMP Import for testing #####
+        from transformers import AutoModelForMaskedLM
+        
+
+        # Default for Data Collator
+        is_tpu = False
+
+        # Load correct packages and get device
+        if hw_config.device_type == "tpu":
+            # Lazy Load even more for TPU
+            import torch_xla.core.xla_model as xm
+            import torch_xla.distributed.parallel_loader as pl
+            import torch_xla.runtime as xr
+
+            device = xm.xla_device()
+            is_tpu = True
+
+            # get real world size just in case
+            real_world_size = xr.world_size()
+            if hw_config.world_size != real_world_size:
+                if rank == 0:
+                    print(f"⚠️ CONFIG MISMATCH: Adjusting world size to {real_world_size}")
+                hw_config.world_size = real_world_size
+        
+        elif hw_config.device_type == "cuda":
+            # Set cuda device to torch
+            torch.cuda.set_device(rank)
+            device = torch.device(f"cuda:{rank}")
+            # Initialize Distributed comm framework
+            # acts like a rendezvous
+            # NVIDIA Collective Communications Library (nccl)
+            if hw_config.world_size > 1:
+                import torch.distributed as dist
+                dist.init_process_group("nccl", rank=rank, world_size=hw_config.world_size)
+       
+        else:
+            device = torch.device("cpu")
+        
+
+        if rank == 0:
+            print(f"Rank 0 is online: {device}.")
+        
+        # Define Collator
+        collator = SpanMLMCollator(config = data_config)
+
+        # Define data_strat
+        data_strat = MLMDataStrategy(
+            rank = rank, world_size = hw_config.world_size, is_tpu = is_tpu,config = data_config
+        ) 
+
+        # Define dataloader
+        train_loader = data_strat.get_mlm_data_loader(
+            collate_fn = collator, curriculum_level = 0, is_train = True
+        )
+
+        # if TPU is being used, apply the ParallelLoader().per_device_loader()
+        if is_tpu:
+            loader = pl.ParallelLoader(train_laoder, [device]).per_device_loader(device)
+        else:
+            loader = train_loader
+        
+        # TEMP MODEL #####
+        model = AutoModelForMaskedLM.from_pretrained(data_config.tokenizer_name).to(device)
+        # #####
+
+        # Require DDP to Wrap the model
+        if hw_config.device_type == "cuda" and hw_config.world_size > 1:
+            from torch.nn.parallel import DistributedDataParallel as DDP
+            model = DDP(model, device_ids=[rank])
+    
+        # Define Optimizer #####
+        optimizer = optim.AdamW(model.parameters(), lr = 1e-4)
+
+        # put model into training mode
+        model.train()
+
+        # Zero the gradient
+        optimizer.zero_grad()
+        
+        # Loop through each batch
+        for step, batch in enumerate(loader):
+
+            # TEMP: Break after 10 steps
+            if step >= 10:
+                break
+            
+            # Get Batch's Input Ids and attach it to device
+            input_ids = batch["input_ids"].to(device)
+            labels = batch["labels"].to(device)
+            
+            # Pass the 
+            outputs = model(input_ids=input_ids, labels=labels)
+
+            # Easy way just take loss from transformers
+            # Divide by grad_accum_steps (for gradient accumulation)
+            loss = outputs.loss / hw_config.grad_accum_steps
+
+            # Apply Backpropagation
+            # This also accumulates the loss
+            loss.backward()
+
+            # Once Gradient has been accumulated, step the model and the optimizer
+            if (step + 1) % hw_config.grad_accum_steps == 0:
+                if is_tpu:
+                    xm.optimizer_step(optimizer)
+                    xm.mark_step()
+                else:
+                    optimizer.step()
+
+                # Zero the gradient
+                optimizer.zero_grad()
+                
+                # Use 1 device (rank = 0) to calculate the real loss
+                if rank == 0:
+                    real_loss = loss.item() * hw_config.grad_accum_steps
+                    print(f"Step {step+1}/10 | Loss: {real_loss:.4f}")
+        
+        # Destroy 
+        if hw_config.device_type == "cuda" and hw_config.world_size > 1:
+            dist.destroy_process_group()
+    
+    except Exception as e:
+        print(f"\n❌ FATAL WORKER ERROR ON RANK {rank}:")
+        traceback.print_exc()
+        return
+
+
+if __name__ == "__main__":
+    # Ensure environment is primed for TPU PJRT
+    for key in ["XRT_TPU_CONFIG", "PJRT_SELECT_DEVICE", "TPU_PROCESS_ADDRESSES"]:
+        os.environ.pop(key, None)
+    os.environ["PJRT_DEVICE"] = "TPU"
+
+    import dataclasses
+
+    HW_CFG = HardwareConfig(hardware_string="v5e-8 TPU")
+    DATA_CFG = MLMDataConfig()
+    
+    driver = HardwareDriver(HW_CFG, DATA_CFG)
+    driver.launch(train_worker)
+
+
+%%writefile parallel_hardware_trainer.py
+import os
+import sys
+import importlib
+import time
+import json
+import site
+import torch
+from datasets import load_dataset
+from torch.utils.data import Dataset, DataLoader
+from dataclasses import dataclass, field # Added field here
+import multiprocessing
+import SpanMLMCollator
+from typing import Optional, List, Union, ClassVar
+import warnings
+
+# Disable Progress Bars
+try:
+    from huggingface_hub.utils import disable_progress_bars
+    disable_progress_bars()
+except ImportError:
+    pass
+
+# Ensure PJRT runtime gets selected, not XRT
+for key in ["XRT_TPU_CONFIG", "PJRT_SELECT_DEVICE", "TPU_PROCESS_ADDRESSES"]:
+    os.environ.pop(key, None)
+os.environ["PJRT_DEVICE"] = "TPU"
+# Add the framework quarantine just in case!
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["TRANSFORMERS_NO_JAX"] = "1"
+os.environ["TRANSFORMERS_NO_FLAX"] = "1"
+os.environ["TRANSFORMERS_NO_TF"] = "1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3" 
+os.environ["TF_XLA_FLAGS"] = "--tf_xla_cpu_global_jit" # Force TF to CPU
+
+# Force Path Refresh
+if 'site' in sys.modules:
+    importlib.reload(site)
+
+
+@dataclass
+class HardwareConfig:
+    HARDWARE_PROFILES = {
+        # Key: {micro_batch, world_size, target_gbs}
+        "v5e-8":  {"mb": 16, "ws": 8, "target": 128}, # TPU Pod
+        "v5e-1":  {"mb": 16, "ws": 1, "target": 128}, # Single TPU
+        "v6e-1":  {"mb": 32, "ws": 1, "target": 128}, # Next-gen TPU
+        "t4*2":   {"mb": 8,  "ws": 2, "target": 128}, # Dual T4 (Kaggle)
+        "t4":     {"mb": 8,  "ws": 1, "target": 128}, # Single T4
+        "l4":     {"mb": 24, "ws": 1, "target": 128}, # Single L4
+        "p100":   {"mb": 16, "ws": 1, "target": 128}, # Single P100
+        "a100":   {"mb": 64, "ws": 1, "target": 128}, # Single A100
+        "cpu":    {"mb": 2,  "ws": 1, "target": 128}, # Local CPU
+    }
+    hardware_string: str = "v5e-8"
+    hf_token: str = "" 
+    base_repo_id = "JamesResearch1216/HELM-Architecture"
+    repo_ver_override: Optional[int] = None
+
+    # These will be overwritten, but just place_holders for now
+    world_size: int = 1
+    batch_size: int = 16
+    grad_accum_steps: int = 1
+    device_type: str = "cpu"
+
+
+
+@dataclass
+# This MLMDataConfig Class 
+class MLMDataConfig:
+    repo_id: str = "JamesResearch1216/HELM-Processed-Data-10B"
+    curriculum: bool = True
+    curriculum_subset_names: List[str] = field(
+        default_factory=lambda: ["seq_1024", "seq_2048", "seq_4096"]
+    )
+    train_split: str = "train"
+    validation_split: str = "validation" 
+    tokenizer_name: str = "answerdotai/ModernBERT-base"
+    max_seq_len: int = 4096 
+    batch_size: int = 32
+    mlm_probability: float = 0.3
+    mlm_use_span_masking: bool = True
+    mlm_span_length: int = 3
+
+class MLMDataStrategy:
+
+    # Initialize (Different for each hardware)
+    def __init__(self, rank = 0, world_size = 1, is_tpu = False, config: Optional[MLMDataConfig] = None):
+        self.rank = rank
+        self.world_size = world_size
+        self.is_tpu = is_tpu
+        self.config = config
+    
+    # Create get_mlm_data_loader function
+    # Note: This only bascially works with the dataset created by prepare_data.py
+
+    def get_mlm_data_loader(self, collate_fn = None, curriculum_level = 0, is_train = True):
+
+        # Set up Dataset Differently for curriculum
+        if (self.config.curriculum):
+            dataset = load_dataset(
+                path = self.config.repo_id, 
+                name = self.config.curriculum_subset_names[curriculum_level], 
+                split = self.config.train_split if is_train else self.config.validation_split,
+                streaming = True
+            )
+        else:
+            # Else just load normally
+            dataset = load_dataset(
+                path = self.config.repo_id, 
+                name = self.config.dataset_subset, 
+                split = self.config.train_split if is_train else self.config.validation_split,
+                streaming = True
+            )
+
+        # IF we're Parallel Processing, Shard the Data so that each device gets a different slice of data
+        if self.world_size > 1:
+            dataset = dataset.shard(num_shards = self.world_size, index = self.rank)
+
+        # Shuffle after you shard
+        dataset = dataset.shuffle(buffer_size = 10000)
+
+        # set workers = 0 for TPUs else actually the real number of CPU cores
+        # this was in the 1.x_model_trainer series of scripts
+        workers = 0 if self.is_tpu else max(1, multiprocessing.cpu_count()-1)
+
+        data_loader = DataLoader(
+            dataset, 
+            batch_size = self.config.batch_size, 
+            num_workers = workers, 
+            drop_last = True, 
+            pin_memory = True if torch.cuda.is_available() else False,  
+            collate_fn = collate_fn
+        )
+
+        # Return data_loader
+        return data_loader
+
+class HardwareDriver:
+
+    # Initialize Hardware
+    def __init__(self, hw_config: HardwareConfig, data_config: MLMDataConfig):
+        self.hw_config = hw_config
+        self.data_config = data_config
+        # Call _parse_hardware here
+        self._parse_hardware()
+    
+
+    def _parse_hardware(self):
+        # get hardware_string (with formatting)
+        hardware_string = self.hw_config.hardware_string.lower().replace(" ", "")
+
+        # Ensure that the hardware_string is valid
+        profile = None
+        for key in self.hw_config.HARDWARE_PROFILES:
+            if (key in hardware_string):
+                profile = self.hw_config.HARDWARE_PROFILES[key]
+                break
+
+        # Default to cpu if none were matching
+        if not profile:
+            profile = self.hw_config.HARDWARE_PROFILES["cpu"]
+            warnings.warn("hardware_string did not match any in HARDWARE_PROFILES. Using \"cpu\"", UserWarning)
+
+        # Add attributes to config
+        # get num_workers
+        self.hw_config.world_size = profile["ws"]
+        # define # of microbatches to equate to batch_size = 128
+        # (used during gradient accumulation)
+        self.hw_config.batch_size = profile["mb"]
+        self.data_config.batch_size = profile["mb"]
+
+        # Calculate gradient accumulation steps to get to target batch_size (128)
+        target = profile["target"]
+        self.hw_config.grad_accum_steps = max(1, target // (profile["mb"] * profile["ws"]))
+
+        # Get device type (save to hw_config)
+        if "tpu" in hardware_string:
+            self.hw_config.device_type = "tpu"
+        elif any(x in hardware_string for x in ["gpu", "cuda", "a100", "t4", "l4"]):
+            self.hw_config.device_type = "cuda"
+        else:
+            self.hw_config.device_type = "cpu"
+    
+    # Launch function: Spawn all the workers and make them run the worker_function
+    def launch(self, worker_fn):
+
+        # Define these for convience
+        world_size = self.hw_config.world_size
+        device = self.hw_config.device_type
+        
+        # If parallel processing
+        if world_size > 1:
+            if device == "tpu":
+                import torch_xla.distributed.xla_multiprocessing as xmp
+                xmp.spawn(worker_fn, args=(self.hw_config, self.data_config), start_method='spawn')
+            elif device == "cuda":
+                import random
+                import torch.multiprocessing as mp
+                
+                # Set up Multi-GPU network
+                os.environ['MASTER_ADDR'] = 'localhost'
+                os.environ['MASTER_PORT'] = str(random.randint(10001, 19999))
+
+
+                mp.spawn(worker_fn, args=(self.hw_config, self.data_config), nprocs=ws)
+        else:
+            # Single Device Execution (Rank 0)
+            worker_fn(0, self.hw_config, self.data_config)
+
+
+
+def train_worker(rank, hw_config, data_config):
+
+    # Lazy Loading for Kaggle Support
+    import traceback
+
+    try:
+        # Even more lazy loading to get the right version of torch
+        import torch
+        import torch.optim as optim
+        # Import Custom Collator
+        import SpanMLMCollator
+        
+        # TEMP Import for testing #####
+        from transformers import AutoModelForMaskedLM
+        
+
+        # Default for Data Collator
+        is_tpu = False
+
+        # Load correct packages and get device
+        if hw_config.device_type == "tpu":
+            # Lazy Load even more for TPU
+            import torch_xla.core.xla_model as xm
+            import torch_xla.distributed.parallel_loader as pl
+            import torch_xla.runtime as xr
+
+            device = xm.xla_device()
+            is_tpu = True
+
+            # get real world size just in case
+            real_world_size = xr.world_size()
+            if hw_config.world_size != real_world_size:
+                if rank == 0:
+                    print(f"⚠️ CONFIG MISMATCH: Adjusting world size to {real_world_size}")
+                hw_config.world_size = real_world_size
+        
+        elif hw_config.device_type == "cuda":
+            # Set cuda device to torch
+            torch.cuda.set_device(rank)
+            device = torch.device(f"cuda:{rank}")
+            # Initialize Distributed comm framework
+            # acts like a rendezvous
+            # NVIDIA Collective Communications Library (nccl)
+            if hw_config.world_size > 1:
+                import torch.distributed as dist
+                dist.init_process_group("nccl", rank=rank, world_size=hw_config.world_size)
+       
+        else:
+            device = torch.device("cpu")
+        
+
+        if rank == 0:
+            print(f"Rank 0 is online: {device}.")
+        
+        # Define Collator
+        collator = SpanMLMCollator.SpanMLMCollator(config = data_config)
+
+        # Define data_strat
+        data_strat = MLMDataStrategy(
+            rank = rank, world_size = hw_config.world_size, is_tpu = is_tpu,config = data_config
+        ) 
+
+        # Define dataloader
+        train_loader = data_strat.get_mlm_data_loader(
+            collate_fn = collator, curriculum_level = 0, is_train = True
+        )
+
+        # if TPU is being used, apply the ParallelLoader().per_device_loader()
+        if is_tpu:
+            loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
+        else:
+            loader = train_loader
+        
+        # TEMP MODEL #####
+        model = AutoModelForMaskedLM.from_pretrained(data_config.tokenizer_name).to(device)
+        # #####
+
+        # Require DDP to Wrap the model
+        if hw_config.device_type == "cuda" and hw_config.world_size > 1:
+            from torch.nn.parallel import DistributedDataParallel as DDP
+            model = DDP(model, device_ids=[rank])
+    
+        # Define Optimizer #####
+        optimizer = optim.AdamW(model.parameters(), lr = 1e-4)
+
+        # put model into training mode
+        model.train()
+
+        # Zero the gradient
+        optimizer.zero_grad()
+        
+        # Loop through each batch
+        for step, batch in enumerate(loader):
+
+            # TEMP: Break after 10 steps
+            if step >= 10:
+                break
+            
+            # Get Batch's Input Ids and attach it to device
+            input_ids = batch["input_ids"].to(device)
+            labels = batch["labels"].to(device)
+            
+            # Pass the 
+            outputs = model(input_ids=input_ids, labels=labels)
+
+            # Easy way just take loss from transformers
+            # Divide by grad_accum_steps (for gradient accumulation)
+            loss = outputs.loss / hw_config.grad_accum_steps
+
+            # Apply Backpropagation
+            # This also accumulates the loss
+            loss.backward()
+
+            # Once Gradient has been accumulated, step the model and the optimizer
+            if (step + 1) % hw_config.grad_accum_steps == 0:
+                if is_tpu:
+                    xm.optimizer_step(optimizer)
+                    xm.mark_step()
+                else:
+                    optimizer.step()
+
+                # Zero the gradient
+                optimizer.zero_grad()
+                
+                # Use 1 device (rank = 0) to calculate the real loss
+                if rank == 0:
+                    real_loss = loss.item() * hw_config.grad_accum_steps
+                    print(f"Step {step+1}/10 | Loss: {real_loss:.4f}")
+        
+        # Destroy 
+        if hw_config.device_type == "cuda" and hw_config.world_size > 1:
+            dist.destroy_process_group()
+    
+    except Exception as e:
+        print(f"\n❌ FATAL WORKER ERROR ON RANK {rank}:")
+        traceback.print_exc()
+        return
+
+
+if __name__ == "__main__":
+    # Ensure environment is primed for TPU PJRT
+    for key in ["XRT_TPU_CONFIG", "PJRT_SELECT_DEVICE", "TPU_PROCESS_ADDRESSES"]:
+        os.environ.pop(key, None)
+    os.environ["PJRT_DEVICE"] = "TPU"
+
+    import dataclasses
+
+    HW_CFG = HardwareConfig(hardware_string="v5e-8 TPU")
+    DATA_CFG = MLMDataConfig()
+    
+    driver = HardwareDriver(HW_CFG, DATA_CFG)
+    driver.launch(train_worker)
+
+
+
+# # Create get_mlm_data_loader function
+# # Note: This only bascially works with the dataset created by prepare_data.py
+# # Arguments:
+# #   - repo_id (HF)
+# #   - name (HF) [of subset if applicable]
+# #   - split (HF)
+# #   - batch_size
+# #   - collate_fn
+
+# def get_mlm_data_loader(batch_size = 8, repo_id = None, name = None, split = None, collate_fn = None, rank=0, world_size=1, is_tpu=False):
+
+#     # Get Dataset (use streaming)
+#     dataset = load_dataset(
+#         path = repo_id, 
+#         name = name, 
+#         split = split, 
+#         streaming = True
+#     )
+
+#     # IF we're Parallel Processing, Shard the Data so that each device gets a different slice of data
+#     if world_size > 1:
+#         dataset = dataset.shard(num_replicas = world_size, index = rank)
+
+#     # Shuffle here
+#     dataset = dataset.shuffle(buffer_size = 10000)
+
+#     # set workers = 0 for TPUs else actually the real number of CPU cores
+#     # this was in the 1.x_model_trainer series of scripts
+#     workers = 0 if is_tpu else max(1, multiprocessing.cpu_count()-1)
+
+#     data_loader = DataLoader(
+#         dataset, 
+#         batch_size = batch_size, 
+#         num_workers = workers, 
+#         drop_last = True, 
+#         pin_memory = True if torch.cuda.is_available() else False,  
+#         collate_fn = collate_fn
+#         )
+
+#     # Return data_loader
+#     return data_loader
+
+
+        # # OLD Selection Strategy (causes recompiling): ##################################################
+        # # Format: [b, num_elastic_heads, 1, 1]
+        # # Use Top-K for when we are in warm-up phase
+        # if (step < self.config.sparsity_warm_up_steps):
+
+        #     # Call top_k on the router attention heads
+        #     _, indices = sigmoid_scores.topk(num_elastic_heads, dim = -1)
+            
+        #     # Create One-hot encoding mask for top_k
+        #     # size(): [num_elastic_heads]
+        #     flat_mask = F.one_hot(indices, num_classes=sigmoid_scores.size(-1)).sum(dim=1).float()
+
+        # else:
+        #     # Standard Threshold Phase: Hard 0.0 or 1.0 decisions
+        #     flat_mask = (sigmoid_scores > self.s_threshold).float()
+
+        # # ###############################################################################################
+
+
+            # HARDWARE_PROFILES = {
+            #     # Key: {micro_batch, world_size, target_gbs}
+            #     "v5e-8":  {"mb": 1, "ws": 8, "target": 64}, # TPU Pod
+            #     "v5e-1":  {"mb": 16, "ws": 1, "target": 128}, # Single TPU
+            #     "v6e-1":  {"mb": 32, "ws": 1, "target": 128}, # Next-gen TPU
+            #     "t4*2":   {"mb": 2,  "ws": 2, "target": 128}, # Dual T4 (Kaggle)
+            #     "t4":     {"mb": 8,  "ws": 1, "target": 128}, # Single T4
+            #     "l4":     {"mb": 24, "ws": 1, "target": 128}, # Single L4
+            #     "p100":   {"mb": 4, "ws": 1, "target": 128}, # Single P100
+            #     "a100":   {"mb": 64, "ws": 1, "target": 128}, # Single A100
+            #     "cpu":    {"mb": 2,  "ws": 1, "target": 128}, # Local CPU
+            # }
+
+            HARDWARE_PROFILES = {
+        "v5e-8": {
+            "ws": 8, "target": 128,
+            1024: {"mb": 16, "use_ckpt": False},
+            2048: {"mb": 4, "use_ckpt": True},
+            4096: {"mb": 1, "use_ckpt": True},
+
+        },
+        "v5e-1": {
+            "ws": 1, "target": 128,
+            1024: {"mb": 16, "use_ckpt": False},
+            2048: {"mb": 4, "use_ckpt": True},
+            4096: {"mb": 1, "use_ckpt": True},
+
+        },
+        "v6e-1": {
+            "ws": 1, "target": 128,
+            1024: {"mb": 32, "use_ckpt": False},
+            2048: {"mb": 16, "use_ckpt": True},
+            4096: {"mb": 4, "use_ckpt": True},
+
+        },
+        "t4*2": {
+            "ws": 2, "target": 128,
+            1024: {"mb": 4, "use_ckpt": False},
+            2048: {"mb": 1, "use_ckpt": True},
+            4096: {"mb": 1, "use_ckpt": True}, # Might not work
+
+        },
+        "t4": {
+            "ws": 1, "target": 128,
+            1024: {"mb": 4, "use_ckpt": False},
+            2048: {"mb": 1, "use_ckpt": True},
+            4096: {"mb": 1, "use_ckpt": True}, # Might not work
+
+        },
+        "g4": {
+            "ws": 1, "target": 128,
+            1024: {"mb": 4, "use_ckpt": False},
+            2048: {"mb": 1, "use_ckpt": True},
+            4096: {"mb": 1, "use_ckpt": True}, # Might not work
+
+        },
+        "l4": {
+            "ws": 1, "target": 128,
+            1024: {"mb": 4, "use_ckpt": False},
+            2048: {"mb": 2, "use_ckpt": True},
+            4096: {"mb": 1, "use_ckpt": True}, # Might not work
+
+        },
+        "p100": {
+            "ws": 1, "target": 128,
+            1024: {"mb": 4, "use_ckpt": False},
+            2048: {"mb": 1, "use_ckpt": True},
+            4096: {"mb": 1, "use_ckpt": True}, # Might not work
+
+        },
+        "a100": {
+            "ws": 1, "target": 128,
+            1024: {"mb": 16, "use_ckpt": False},
+            2048: {"mb": 4, "use_ckpt": True},
+            4096: {"mb": 1, "use_ckpt": True},
+
+        },
+        "h100": {
+            "ws": 1, "target": 128,
+            1024: {"mb": 16, "use_ckpt": False},
+            2048: {"mb": 4, "use_ckpt": True},
+            4096: {"mb": 1, "use_ckpt": True},
+        },
+        "cpu": {
+            "ws": 1, "target": 128,
+            1024: {"mb": 1, "use_ckpt": False},
+            2048: {"mb": 1, "use_ckpt": False},
+            4096: {"mb": 1, "use_ckpt": False},
+
+        }
+    }
+
+
+    # Parse hardware based on the curriculum level
+    def _parse_hardware(self, curriculum_level = 0):
+        # get hardware_string (with formatting)
+        hardware_string = self.hw_config.hardware_string.lower().replace(" ", "")
+
+        # Ensure that the hardware_string is valid
+        profile = None
+        for key in self.hw_config.HARDWARE_PROFILES:
+            if (key in hardware_string):
+                profile = self.hw_config.HARDWARE_PROFILES[key]
+                break
+
+        # Default to cpu if none were matching
+        if not profile:
+            profile = self.hw_config.HARDWARE_PROFILES["cpu"]
+            warnings.warn("hardware_string did not match any in HARDWARE_PROFILES. Using \"cpu\"", UserWarning)
+
+        # Add attributes to config
+        # get num_workers
+        self.hw_config.world_size = profile["ws"]
+        # define # of microbatches to equate to batch_size = 128
+        # (used during gradient accumulation)
+        self.hw_config.batch_size = profile[curriculum_level]["mb"]
+        self.data_config.batch_size = profile[curriculum_level]["mb"]
+
+        # Extract new variables
+        self.data_config.max_seq_len = profile[curriculum_level]["sl"]
+        self.hw_config.use_ckpt = profile[curriculum_level]["use_ckpt"]
+
+        # Calculate gradient accumulation steps to get to target batch_size (128)
+        target = profile["target"]
+        self.hw_config.grad_accum_steps = max(1, target // (profile[curriculum_level]["mb"] * profile["ws"]))
+
+        # Get device type (save to hw_config)
+        if "tpu" in hardware_string:
+            self.hw_config.device_type = "tpu"
+        elif any(x in hardware_string for x in ["gpu", "cuda", "a100", "p100", "h100", "t4", "l4"]):
+            self.hw_config.device_type = "cuda"
+        else:
+            self.hw_config.device_type = "cpu"
+
+
+
+
+                # Inner Try Catch Block: Ensure that the files have successfully uploaded before deleting local copies
+                try:
+                    # Wait 10 seconds before checking
+                    time.sleep(10)
+
+                    # Set Flags
+                    t_state_check = False
+                    m_ckpt_check = False
+
+                    # Load Commit history for both the training_state and the model_checkpoint
+                    m_ckpt_commits = api.list_repo_commits(repo_id=repo_id, path=filename)
+                    t_state_commits = api.list_repo_commits(repo_id=repo_id, path="training_state.json")
+
+                    # For the model files, just check if a history even exists
+                    m_ckpt_check = True if m_ckpt_commits else False
+
+                    # For training_state.json, compare the time (5 minute Difference max)
+                    if t_state_commits:
+                        elasped_time = (datetime.now(timezone.utc) - t_state_commits[0].created_at.astimezone(timezone.utc)).total_seconds()
+                        t_state_check = True if elapsed_time < 300 else False
+
+                    # Check if both flags have been raised and only then delete from current runtime
+                    if t_state_check and m_ckpt_check:
+                        # Squash History to remove the archives of deletec files
+                        api.super_squash_history(repo_id=repo_id)
+
+                        # Remove the current checkpoint and UPLOAD_REQUEST.json
+                        os.remove(filename)
+                        os.remove("UPLOAD_REQUEST.json")
+
+                        print(f"✅ Successfully uploaded {filename} @ step {step} to {repo_id}")
+
+
+                except Exception as e:
+                    print(f"❌ Uhh something went wrong with checking that both files have uploaded: {e}")
+
+
+
+    # Initialize new checkpoint dictionary
+    def _init_new_training_state(self):
+        training_state_dict = {  
+            # "metadata": {
+            #     "project_name": self.checkpoint_config.model_repo_id,
+            #     "total_tokens_processed_global": 0,
+            #     "total_rows_processed_global": 0,
+            #     "rows_processed_at_curr_level": 0,
+            #     "current_curriculum_level": 0,
+            #     "latest_step": 0,
+            #     "best_step": 0
+            # },
+            "checkpoints": {}
+        }
+        return training_state_dict
+
+
+            # Find Lowest (Best???) Loss
+            min_loss = float("inf")
+            best_step = 0
+            for step, data in self.training_state["checkpoints"].items():
+                if data["status"] != "deleted" and data["metrics"]["total_loss"] < min_loss:
+                    min_loss = data["metrics"]["total_loss"]
+                    best_step = int(step)
+            
+            # Update meta data
+            self.training_state["metadata"]["latest_step"] = global_step
+            self.training_state["metadata"]["current_curriculum_level"] = curriculum_level
+            self.training_state["metadata"]["total_tokens_processed_global"] = total_tokens_processed_global
+            self.training_state["metadata"]["total_rows_processed_global"] = total_rows_processed_global
+            self.training_state["metadata"]["rows_processed_at_curr_level"] = rows_processed_at_curr_level
+            self.training_state["metadata"]["best_step"] = best_step
+
+
+    
+       # Resume Training: resume from the correct checkpoint
+    # Returns how many examples to skip and which step to resume from (if errors: 0,0)
+    # pass the model and optimizer by reference
+    # def resume_training(self, model, optimizer, batch_size, grad_accum_steps):
+    def resume_training(self, model, optimizer):
+        # Lazy Load torch to get correct version
+        import torch
+        
+        # # Check if this repo is a 🫰🫰 fresh guy (also make sure 1 device prints)
+        # if self.training_state["metadata"]["latest_step"] == 0 and self.rank == 0:
+        #     print("⚠️ According to the training_state, this ones a 🫰🫰 fresh guy. Starting from ground 0")
+        #     # return 0,0
+        #     return 0
+
+        # Keep track of all the valid steps
+        valid_steps = []
+        for step, data in self.training_state["checkpoints"].items():
+            if data["status"] != "deleted":
+                valid_steps.append(int(step))
+        
+        # Print messege and return 0 if its brand new
+        if not valid_steps and self.rank == 0:
+            print("According to the training_state, every single checkpoint is invalid or deleted. Starting from ground 0")
+            # return 0,0
+            return None
+        
+        # Get Actual valid resume step (e.g. I deleted the most recent version but it still says otherwise)
+        actual_resume_step = max(valid_steps)
+        ckpt_entry = self.training_state["checkpoints"][str(actual_resume_step)]
+        filname = ckpt_entry["file"]
+
+        # # Print warning if the metadata doesn't match the most recent valid version
+        # if self.rank == 0 and (self.training_state["metadata"]["latest_step"] != actual_resume_step):
+        #     print(f"Metadata shows that the latest_step was {self.training_state["metadata"]["latest_step"]}; howevever, the latest valid step is {actual_resume_step}. Synchronizing...")
+        #     # Synchronizing to make sure the that the latest_step is actually the acual_resume_step
+        #     # This ensures that the check_upload_condition works (since it uses latest_step)
+        #     self.training_state["metadata"]["latest_step"] = actual_resume_step
+
+        # Barrier
+        if self.world_size > 1:
+            self._smart_barrier("weight_download_start")
+        
+        # Only let rank 0 start downloading (the others will download from the runtime local disk):
+        if self.rank == 0:
+            print(f"Downloading {filename} from Hub...")
+            try:
+                hf_hub_download(
+                    repo_id = self.checkpoint_config.model_repo_id,
+                    filename = filename,
+                    repo_type = "model",
+                    token = self.checkpoint_config.hf_token,
+                    local_dir = "."
+                )
+            except Exception as e:
+                print(f"Failure to Download {filename}: {e}")
+        
+        # Barrier
+        if self.world_size > 1:
+            self._smart_barrier("weight_download_end")
+        
+        # Now that the model has been downloaded onto the runtime local disk, let each device download it
+        # All ranks load the weights from the local file
+        try:
+
+            # Load the checkpoint
+            pt_path = os.path.join(".", filename)
+            ckpt = torch.load(pt_path, map_location='cpu', weights_only=False)
+            
+            # Get the model state
+            model_state = ckpt['model_state']
+
+            # GPUs and TPUs might add module. or not have it at all
+            # Add or subtract this to maintain hardware compatibility
+            new_state_dict = {}
+            for k, v in model_state.items():
+                if k.startswith('module.') and not hasattr(model, 'module'):
+                    new_state_dict[k[7:]] = v
+                elif not k.startswith('module.') and hasattr(model, 'module'):
+                    new_state_dict[f'module.{k}'] = v
+                else:
+                    new_state_dict[k] = v
+            
+            # Load the model into dictionary
+            model.load_state_dict(new_state_dict, strict=False)
+            
+            # Load the optmizer
+            if optimizer and 'optimizer_state' in ckpt:
+                optimizer.load_state_dict(ckpt['optimizer_state'])
+            
+            # print success
+            if self.rank == 0:
+                print(f"Successfully loaded model and optimizer from Step {actual_resume_step}!")
+            
+            # # Get skip number
+            # skip_examples = actual_resume_step * batch_size * grad_accum_steps
+            # return skip_examples, actual_resume_step
+
+            # Just return the ckpt_entry; Extract the values later
+            return ckpt_entry
+            
+        except Exception as e:
+            if self.rank == 0: print(f"⚠️ Failed to load weights: {e}. Falling back to token zero.")
+            # return 0, 0
+            return 0
