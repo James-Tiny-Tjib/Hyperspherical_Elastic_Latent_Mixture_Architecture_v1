@@ -905,6 +905,7 @@ class HELMModel(nn.Module):
             total_sparsity_loss += sparsity_loss
 
         # Return hidden state (feature extraction / context location prediction) & special losses
+        # hidden_states: [b, seq_len, hidden_size]
         return hidden_states, total_aux_loss, total_sparsity_loss
 
 
@@ -960,12 +961,14 @@ class HELMForMaskedLM(PreTrainedModel):
     def forward(self, input_ids, attention_mask, current_step = None):
 
         # Gather Context from the model
+        # features: [b, seq_len, hidden_size]
         features, total_aux_loss, total_sparsity_loss = self.model(input_ids, attention_mask, current_step)
 
         # Scale / prepare sz
         sz = self.sz * (self.ngpt_sz_init_value / self.ngpt_sz_init_scale)
 
         # project features onto classifer
+        # [b, seq_len, hidden_size] * [hidden_size, vocab_size] = [b, seq_len, vocab_size]
         unscaled_logits = self.classifier(features)
 
         # Scale the logits with sz

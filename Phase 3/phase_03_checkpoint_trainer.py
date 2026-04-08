@@ -179,6 +179,12 @@ class CheckpointConfig:
     model_repo_id: str = "JamesResearch1216/HELM-Architecture" 
     # repo_ver_override: Optional[int] = None
     hf_token: str = ""
+
+    # How to use interval_dict:
+    #  - Let k_i be the ith key in interval_dict
+    #  - Let v_i be the ith value in interval_dict
+    #  - For step k_i to k_i+1, save a checkpoint every v_i steps
+    #  - After the last k_i, save every v_i for the rest of the duration
     interval_dict: Dict[int, int] = field(
         default_factory=lambda: {0: 100, 1000: 200, 5000: 500}
     )
@@ -229,11 +235,12 @@ class MLMDataStrategy:
         if self.world_size > 1 and is_train:
             dataset = dataset.shard(num_shards = self.world_size, index = self.rank)
 
-        # Skip examples:
-        dataset = dataset.skip(skip_rows)
-
         # Shuffle after you shard
-        dataset = dataset.shuffle(buffer_size = 10000)
+        # Make sure you set a seed to ensure the I don't use the same data again
+        dataset = dataset.shuffle(buffer_size = 10000, seed = 67)
+       
+        # Skip examples after you shuffle based on the specific seed:
+        dataset = dataset.skip(skip_rows)
 
         # set workers = 0 for TPUs else actually the real number of CPU cores
         # this was in the 1.x_model_trainer series of scripts
@@ -340,6 +347,7 @@ class CheckpointDriver:
         self.rank = rank
         self.world_size = world_size
         self.api = HfApi(token=self.checkpoint_config.hf_token)
+        self.actual_resume_step = None
 
         # Just print to ensure shit is moving
         if rank == 0:
@@ -459,10 +467,10 @@ class CheckpointDriver:
         return final_state_dict
 
     # Check to see if a checkpoint should be uploaded
-    def check_upload_condition(self, curr_global_step, latest_step):
+    def check_upload_condition(self, curr_global_step):
         # Subtract offset if start_from_global (it treated step 0 = last checkpoint's step value)
         if not self.checkpoint_config.start_from_global:
-            curr_global_step -= latest_step
+            curr_global_step -= self.actual_resume_step
         if curr_global_step <=0:
             return False
         
@@ -490,7 +498,7 @@ class CheckpointDriver:
     # Returns:
     # Checkpoint Entry Dictionary Snapshot if available
     # Dicionary with a bunch of 0s if all checkpoints were deleted or starting fresh
-    # None if other errors
+    # None if other errors (fast failing)
     def resume_training(self, model, optimizer):
         # Lazy Load torch to get correct version
         import torch
@@ -514,6 +522,7 @@ class CheckpointDriver:
         
         # Get Actual valid resume step (e.g. I deleted the most recent version but it still says otherwise)
         actual_resume_step = max(valid_steps)
+        self.actual_resume_step = actual_resume_step
         ckpt_entry = self.training_state["checkpoints"][str(actual_resume_step)]
         filename = ckpt_entry["file"]
 
@@ -655,6 +664,7 @@ class CheckpointDriver:
 # Function that all devices will run (ran from the launch function right above)
 def train_worker(rank, hw_config, data_config, ckpt_config):
 
+    # Lazy Load
     import sys
     import traceback
     import os # Add os
@@ -663,9 +673,9 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
     
     
     try:
+        # Lazy Load
         import datasets
         datasets.config.TF_AVAILABLE = False
-        
         import torch
         import torch.nn as nn
         import torch.optim as optim
@@ -755,9 +765,6 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
         use_scaler = hw_config.use_scaler
         scaler = torch.amp.GradScaler('cuda') if hw_config.device_type == "cuda" and use_scaler else None
 
-        # # Global step count
-        # global_step = 0
-
         # ========== CHECKPOINT TECHNOLOGICA ==========
 
         # Define Checkpoint Driver
@@ -774,14 +781,15 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
         total_rows_processed_global = ckpt_snapshot["total_rows_processed_global"]
         total_tokens_processed_global = ckpt_snapshot["total_tokens_processed_global"]
 
-        globel_step = actual_resume_step
+        # Set the global step to where we left off from the previous checkpoint
+        global_step = actual_resume_step
 
         # If starting fresh initialize weights
         if actual_resume_step == 0:
             model.apply(model._init_weights)
         
         
-        # Curriculum Outer Loop:
+        # Curriculum Outer Loop (starting from the current curriculum):
         for level in range(start_curr_level,len(data_config.curriculum_subset_names)):
 
             # Set Model to Training Mode
@@ -813,7 +821,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
            
             # Define train_dataloader
             train_loader = data_strat.get_mlm_data_loader(
-                collate_fn = collator, batch_size = hw_config.batch_size, curriculum_level = level, is_train = True
+                collate_fn = collator, skip_rows = rows_processed_at_curr_level, batch_size = hw_config.batch_size, curriculum_level = level, is_train = True
             )
 
             # Define validation_dataloader
@@ -826,7 +834,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                 train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
                 validation_loader = pl.ParallelLoader(validation_loader, [device]).per_device_loader(device)
                 
-
+            # ========== TRAINING LOOP ==========
             # Loop through each batch
             for step, batch in enumerate(train_loader):
                 
@@ -839,10 +847,14 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                 if hw_config.device_type == "cuda":
                     with torch.autocast(device_type="cuda", dtype=dtype):
                         logits, aux_loss, sparsity_loss = model(input_ids=input_ids, attention_mask=attention_mask, current_step=global_step)
+                        # logits: [mb, seq_len, vocab_size] -> [mb*seq_len, vocab_size]
+                        # labels: [mb, seq_len], [mb*seq_len]
                         ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
                         total_loss = (ce_loss + aux_loss + sparsity_loss) / hw_config.grad_accum_steps
                 else:
                     logits, aux_loss, sparsity_loss = model(input_ids=input_ids, attention_mask=attention_mask, current_step=global_step)
+                    # logits: [mb, seq_len, vocab_size] -> [mb*seq_len, vocab_size]
+                    # labels: [mb, seq_len], [mb*seq_len]                    
                     ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
                     total_loss = (ce_loss + aux_loss + sparsity_loss) / hw_config.grad_accum_steps
                 
@@ -865,13 +877,47 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                     # Zero the gradient
                     optimizer.zero_grad()
                     global_step += 1
+
+                    # Calculating the values for the save_checkpoint
+                    # Should just be the target gbs, but just in case
+                    rows_this_step = hw_config.batch_size * hw_config.grad_accum_steps * hw_config.world_size
+                    tokens_this_step = rows_this_step * seq_len
+
+                    rows_processed_at_curr_level +=  rows_this_step
+                    total_rows_processed_global += rows_this_step
+                    total_tokens_processed_global += tokens_this_step
                     
                     # Use 1 device (rank = 0) to calculate the real loss
                     if rank == 0:
-                        print(f"Step {global_step} | Total Loss: {total_loss.item()*hw_config.grad_accum_steps:.4f} | CE: {ce_loss.item():.4f} | Aux: {aux_loss if isinstance(aux_loss, float) else aux_loss.item():.4f} | Sparsity: {sparsity_loss if isinstance(sparsity_loss, float) else sparsity_loss.item():.4f}")        
+                        print(f"Step {global_step} | Total Loss: {total_loss.item()*hw_config.grad_accum_steps:.4f} | CE: {ce_loss.item():.4f} | Aux: {aux_loss if isinstance(aux_loss, float) else aux_loss.item():.4f} | Sparsity: {sparsity_loss if isinstance(sparsity_loss, float) else sparsity_loss.item():.4f}")   
+
+                    # Save the model if the time is right (based on interval_dict from CheckpoingConfig)
+                    if checkpoint_driver.check_upload_condition(global_step):
+                        checkpoint_driver.save_checkpoint(
+                            model = model, 
+                            optimizer = optimizer, 
+                            global_step = global_step, 
+                            hardware_string = hw_config.hardware_string,
+                            metrics: {
+                                "Total Loss" :  rount(total_loss.item()*hw_config.grad_accum_steps,5),
+                                "CE Loss" : round(ce_loss.item(),5),
+                                "AUX Loss" : round(aux_loss.item(),5),
+                                "Sparsity" : round(sparsity_loss.item(),5)
+
+                            }, 
+                            is_tpu = is_tpu, 
+                            curriculum_level = level,
+                            total_tokens_processed_global = total_tokens_processed_global,
+                            total_rows_processed_global = total_rows_processed_global,
+                            rows_processed_at_curr_level = rows_processed_at_curr_level
+                        )
             
             # zero the gradient again just in case
             optimizer.zero_grad()
+
+
+
+            # ========== VALIDATION LOOP ==========
 
             # Put model into eval mode
             model.eval()
