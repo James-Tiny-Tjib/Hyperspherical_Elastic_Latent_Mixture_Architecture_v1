@@ -92,15 +92,14 @@ Created this log to help me document what is happening
     !pkill -9 -f python - good for killing zombie tpu processes where you click the pause button instead of letting it end naturally
     I notice that our router keeps collapsing, our Aux Loss (only using the 4 same heads im guessing). Maybe up the sparsity loss / get rid of warm up???
 
-
+4/9 (1 Hour):
+    Finalized phase_03 - now checkpoints pretty good
 
     
     
 
 
 Goals:
-    Update train_worker
-    PUSH SHIT TO GITHUB
     Telemetrics
     TRAIN DIS SHIIIIII RAWWWHHHHHHHH 😈😈😈😈😈
 
