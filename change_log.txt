@@ -84,11 +84,16 @@ Created this log to help me document what is happening
     Updated Checkpoint Driver to remove Metadata Logic
     Started Fixing train_worker
 
-4/8 (4 Hours):
+4/8 (6 Hours):
     Fixed train_worker - now successfully uploads the files to the HF Hub
     Created Repo to ensure my stuff doesn't get lost
     Created "Upload Queue" structure to allow for multiple upload requests if training the model was faster than the uploading
-    
+    Completed Phase 3 - Checkpoint trainer
+    !pkill -9 -f python - good for killing zombie tpu processes where you click the pause button instead of letting it end naturally
+    I notice that our router keeps collapsing, our Aux Loss (only using the 4 same heads im guessing). Maybe up the sparsity loss / get rid of warm up???
+
+
+
     
     
 

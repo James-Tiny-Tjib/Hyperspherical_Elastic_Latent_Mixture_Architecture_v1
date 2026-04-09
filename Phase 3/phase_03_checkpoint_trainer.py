@@ -8,7 +8,7 @@ import site
 import torch
 from datasets import load_dataset
 from torch.utils.data import Dataset, DataLoader
-from huggingface_hub import hf_hub_download, create_repo, HfApi, list_files_in_repo
+from huggingface_hub import hf_hub_download, create_repo, HfApi
 from dataclasses import dataclass, field # Added field here
 import multiprocessing
 from typing import Optional, List, Union, ClassVar, Dict, Any
@@ -126,7 +126,8 @@ class HardwareConfig:
         }
     }
 
-    hardware_string: str = "p100 gpu"
+    # hardware_string: str = "v5e-8 tpu"
+    hardware_string: str = "t4*2 gpu"
     hf_token: str = ""
 
 
@@ -136,7 +137,6 @@ class HardwareConfig:
     dtype: torch.dtype = torch.float16
     use_scaler: bool = True
     batch_size: int = 16
-    use_ckpt: bool = False
     grad_accum_steps: int = 1
     hardware_profile: Dict[Union[str, int], Any] = field(
         default_factory=lambda: HardwareConfig.HARDWARE_PROFILES["cpu"]
@@ -176,7 +176,7 @@ class MLMDataConfig:
 
 @dataclass
 class CheckpointConfig:
-    model_repo_id: str = "JamesResearch1216/HELM-Architecture" 
+    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture" 
     # repo_ver_override: Optional[int] = None
     hf_token: str = ""
 
@@ -341,9 +341,9 @@ class HardwareDriver:
 class CheckpointDriver:
 
     # Initialize Checkpoint Driver
-    def __init__(self, hw_config: HardwareConfig, checkpoint_config: CheckpointConfig, rank: int, world_size: int):
+    def __init__(self, hw_config: HardwareConfig, ckpt_config: CheckpointConfig, rank: int, world_size: int):
         self.hw_config = hw_config
-        self.checkpoint_config = checkpoint_config
+        self.checkpoint_config = ckpt_config
         self.rank = rank
         self.world_size = world_size
         self.api = HfApi(token=self.checkpoint_config.hf_token)
@@ -462,6 +462,16 @@ class CheckpointDriver:
         # Then every rank (including) loads the dict from "local_training_state.json"
         with open("local_training_state.json", "r") as f:
             final_state_dict = json.load(f)
+
+        # Wait for EVERY rank to finish reading the file
+        if self.world_size > 1:
+            self._smart_barrier("state_read_complete")
+
+        # Then Delete
+        if self.rank == 0:
+            import os
+            if os.path.exists("local_training_state.json"):
+                os.remove("local_training_state.json")
 
         # All Return the same dict
         return final_state_dict
@@ -807,14 +817,13 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
             # Get micro batch size (mb) and use gradient checkpointing (use_ckpt)
             hw_config.batch_size = level_profile["mb"]
-            hw_config.use_ckpt = level_profile["use_ckpt"]
-            # Change the Model Config to allow gradient checkpointing or not
-            model.config.use_ckpt =  level_profile["use_ckpt"]
-            # CRITICAL: Push the flag into the model and its internal HELMModel
+            
+            # CRITICAL: Unwrap the model first to handle DDP (GPUs) vs Raw (TPUs)
             unwrap_model = model.module if hasattr(model, "module") else model
-            unwrap_model.config.use_ckpt = hw_config.use_ckpt
-            unwrap_model.model.use_ckpt = hw_config.use_ckpt # HELMModel caches this
-
+            # Change the Model Configs using the safely unwrapped model
+            unwrap_model.config.use_ckpt = level_profile["use_ckpt"]
+            unwrap_model.model.use_ckpt = level_profile["use_ckpt"] # HELMModel caches this
+            
             # Save seq_len somewhere just in case if we need to use it
             seq_len = level_profile["sl"]
 
