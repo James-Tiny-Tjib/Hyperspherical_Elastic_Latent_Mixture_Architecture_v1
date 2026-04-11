@@ -29,7 +29,7 @@ for key in ["XRT_TPU_CONFIG", "PJRT_SELECT_DEVICE", "TPU_PROCESS_ADDRESSES"]:
 os.environ["PJRT_DEVICE"] = "TPU"
 # Add the framework quarantine just in case!
 os.environ["JAX_PLATFORMS"] = "cpu"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3" 
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 # Prevent C++ thread deadlocks during 10B token streaming
 os.environ["OMP_NUM_THREADS"] = "1"
@@ -60,7 +60,7 @@ class HardwareConfig:
     HARDWARE_PROFILES = {
         "v5e-8": {
             "ws": 8, "target": 128, "dtype": torch.bfloat16,"use_scaler": False,
-            0: {"mb": 8, "use_ckpt": False, "sl": 1024},
+            0: {"mb": 16, "use_ckpt": False, "sl": 1024},
             1: {"mb": 4, "use_ckpt": False, "sl": 2048},
             2: {"mb": 1, "use_ckpt": False, "sl": 4096},
         },
@@ -72,31 +72,31 @@ class HardwareConfig:
         },
         "v6e-1": {
             "ws": 1, "target": 128, "dtype": torch.bfloat16,"use_scaler": False,
-            0: {"mb": 32, "use_ckpt": False, "sl": 1024},
-            1: {"mb": 16, "use_ckpt": False, "sl": 2048},
-            2: {"mb": 4, "use_ckpt": False, "sl": 4096},
+            0: {"mb": 16, "use_ckpt": False, "sl": 1024},
+            1: {"mb": 4, "use_ckpt": False, "sl": 2048},
+            2: {"mb": 2, "use_ckpt": False, "sl": 4096},
         },
         "t4*2": {
             "ws": 2, "target": 128, "dtype": torch.float16, "use_scaler": True,
-            0: {"mb": 4, "use_ckpt": True, "sl": 1024},
+            0: {"mb": 4, "use_ckpt": False, "sl": 1024},
             1: {"mb": 1, "use_ckpt": True, "sl": 2048},
             2: {"mb": 1, "use_ckpt": True, "sl": 4096},
         },
         "t4": {
             "ws": 1, "target": 128, "dtype": torch.float16, "use_scaler": True,
-            0: {"mb": 4, "use_ckpt": True, "sl": 1024},
+            0: {"mb": 4, "use_ckpt": False, "sl": 1024},
             1: {"mb": 1, "use_ckpt": True, "sl": 2048},
             2: {"mb": 1, "use_ckpt": True, "sl": 4096},
         },
         "g4": {
             "ws": 1, "target": 128, "dtype": torch.float16, "use_scaler": True,
-            0: {"mb": 4, "use_ckpt": False, "sl": 1024},
+            0: {"mb": 32, "use_ckpt": False, "sl": 1024},
             1: {"mb": 1, "use_ckpt": True, "sl": 2048},
             2: {"mb": 1, "use_ckpt": True, "sl": 4096},
         },
         "l4": {
             "ws": 1, "target": 128, "dtype": torch.float16, "use_scaler": True,
-            0: {"mb": 4, "use_ckpt": False, "sl": 1024},
+            0: {"mb": 8, "use_ckpt": False, "sl": 1024},
             1: {"mb": 2, "use_ckpt": True, "sl": 2048},
             2: {"mb": 1, "use_ckpt": True, "sl": 4096},
         },
@@ -108,13 +108,13 @@ class HardwareConfig:
         },
         "a100": {
             "ws": 1, "target": 128, "dtype": torch.bfloat16,"use_scaler": False,
-            0: {"mb": 16, "use_ckpt": False, "sl": 1024},
+            0: {"mb": 32, "use_ckpt": False, "sl": 1024},
             1: {"mb": 4, "use_ckpt": True, "sl": 2048},
             2: {"mb": 1, "use_ckpt": True, "sl": 4096},
         },
         "h100": {
             "ws": 1, "target": 128, "dtype": torch.bfloat16,"use_scaler": False,
-            0: {"mb": 16, "use_ckpt": False, "sl": 1024},
+            0: {"mb": 32, "use_ckpt": False, "sl": 1024},
             1: {"mb": 4, "use_ckpt": True, "sl": 2048},
             2: {"mb": 1, "use_ckpt": True, "sl": 4096},
         },
@@ -126,8 +126,8 @@ class HardwareConfig:
         }
     }
 
-    # hardware_string: str = "v5e-8 tpu"
-    hardware_string: str = "t4*2 gpu"
+    # hardware_string: str = "v6e-1 tpu"
+    hardware_string: str = "a100 gpu"
     hf_token: str = ""
 
 
@@ -142,7 +142,7 @@ class HardwareConfig:
         default_factory=lambda: HardwareConfig.HARDWARE_PROFILES["cpu"]
     )
     device_type: str = "cpu"
-    
+
 
 # ==================================================
 # MLMDataConfig
@@ -161,7 +161,7 @@ class MLMDataConfig:
     #     default_factory=lambda: [1024, 2048, 4096]
     # )
     train_split: str = "train"
-    validation_split: str = "validation" 
+    validation_split: str = "validation"
     tokenizer_name: str = "answerdotai/ModernBERT-base"
     mlm_probability: float = 0.3
     mlm_use_span_masking: bool = True
@@ -176,7 +176,7 @@ class MLMDataConfig:
 
 @dataclass
 class CheckpointConfig:
-    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture" 
+    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture"
     # repo_ver_override: Optional[int] = None
     hf_token: str = ""
 
@@ -206,7 +206,7 @@ class MLMDataStrategy:
         self.is_tpu = is_tpu
         self.config = config
         self.hf_token = hf_token
-    
+
     # Create get_mlm_data_loader function
     # Note: This only bascially works with the dataset created by prepare_data.py
 
@@ -215,8 +215,8 @@ class MLMDataStrategy:
         # Set up Dataset Differently for curriculum
         if (self.config.curriculum):
             dataset = load_dataset(
-                path = self.config.data_repo_id, 
-                name = self.config.curriculum_subset_names[curriculum_level], 
+                path = self.config.data_repo_id,
+                name = self.config.curriculum_subset_names[curriculum_level],
                 split = self.config.train_split if is_train else self.config.validation_split,
                 streaming = True,
                 token=self.hf_token
@@ -224,8 +224,8 @@ class MLMDataStrategy:
         else:
             # Else just load normally
             dataset = load_dataset(
-                path = self.config.data_repo_id, 
-                name = self.config.dataset_subset, 
+                path = self.config.data_repo_id,
+                name = self.config.dataset_subset,
                 split = self.config.train_split if is_train else self.config.validation_split,
                 streaming = True,
                 token=self.hf_token
@@ -238,7 +238,7 @@ class MLMDataStrategy:
         # Shuffle after you shard
         # Make sure you set a seed to ensure the I don't use the same data again
         dataset = dataset.shuffle(buffer_size = 10000, seed = 67)
-       
+
         # Skip examples after you shuffle based on the specific seed:
         dataset = dataset.skip(skip_rows)
 
@@ -248,11 +248,11 @@ class MLMDataStrategy:
         # Just set workers to 0. Don't wanna crash our CPU, right?
 
         data_loader = DataLoader(
-            dataset, 
-            batch_size = batch_size, 
-            num_workers = 0, 
-            drop_last = True, 
-            pin_memory = False,  
+            dataset,
+            batch_size = batch_size,
+            num_workers = 0,
+            drop_last = True,
+            pin_memory = False,
             collate_fn = collate_fn
         )
 
@@ -270,7 +270,7 @@ class HardwareDriver:
         self.ckpt_config = ckpt_config
         # Call _parse_hardware here
         self.hw_config.hardware_profile = self._parse_hardware()
-    
+
 
     # Parse hardware based on the curriculum level
     def _parse_hardware(self):
@@ -306,17 +306,17 @@ class HardwareDriver:
             self.hw_config.device_type = "cuda"
         else:
             self.hw_config.device_type = "cpu"
-        
+
         # Return the profile to use in train_worker
         return profile
-    
+
     # Launch function: Spawn all the workers and make them run the worker_function
     def launch(self, worker_fn):
 
         # Define these for convience
         world_size = self.hw_config.world_size
         device = self.hw_config.device_type
-        
+
         # If parallel processing
         if world_size > 1:
             if device == "tpu":
@@ -325,7 +325,7 @@ class HardwareDriver:
             elif device == "cuda":
                 import random
                 import torch.multiprocessing as mp
-                
+
                 # Set up Multi-GPU network
                 os.environ['MASTER_ADDR'] = 'localhost'
                 os.environ['MASTER_PORT'] = str(random.randint(10001, 19999))
@@ -360,34 +360,34 @@ class CheckpointDriver:
     def _smart_barrier(self, name="barrier"):
         if self.hw_config.world_size <= 1:
             return  # No synchronization needed for single device
-            
+
         if self.hw_config.device_type == "tpu":
             import torch_xla.core.xla_model as xm
             xm.rendezvous(name)
         elif self.hw_config.device_type == "cuda":
             import torch.distributed as dist
             if dist.is_initialized():
-                dist.barrier()    
+                dist.barrier()
 
 
     # Initialize new checkpoint dictionary
     def _init_new_training_state(self):
-        training_state_dict = {  
+        training_state_dict = {
             "checkpoints": {}
         }
         return training_state_dict
-    
-    
-    # Ensure that if checkpoints are deleted but appear 
+
+
+    # Ensure that if checkpoints are deleted but appear
     def _deletion_status_updates(self, training_state):
-        
+
         # Try to take the repo file's file paths
         repo_files = None
         try:
             repo_files = list(self.api.list_repo_files(repo_id = self.checkpoint_config.model_repo_id))
         except RepositoryNotFoundError:
             raise RepositoryNotFoundError(f"❌ Repo: \"{self.checkpoint_config.model_repo_id}\" was not found when trying to update deletion status")
-            
+
 
         # Loop Through every checkpoint and switch the status if necessary
         for ckpt_vals in training_state["checkpoints"].values():
@@ -395,8 +395,8 @@ class CheckpointDriver:
                 ckpt_vals["status"] = "deleted"
                 ckpt_vals["file"] = ""
 
-                
-        
+
+
         # Return training_state
         return training_state
 
@@ -420,7 +420,7 @@ class CheckpointDriver:
                 # Successfully loaded
                 print(f"✅ {filename} loaded successfully from {self.checkpoint_config.model_repo_id}")
                 training_state = self._deletion_status_updates(training_state)
-            
+
             # If the repo doesn't exist, make the repo
             except RepositoryNotFoundError:
                 # Print Error Statements
@@ -438,27 +438,27 @@ class CheckpointDriver:
 
                 # Make new training_state dict
                 training_state = self._init_new_training_state()
-            
+
             # The repo exists, but it's empty or doesn't have the state file yet
             except EntryNotFoundError:
                 # Print info
                 print(f"⚠️ {self.checkpoint_config.model_repo_id} exists, but no {filename} found. Starting fresh.")
                 training_state = self._init_new_training_state()
-            
+
             # Unknown Error
             except Exception as e:
                 # Catch-all for network timeouts, corrupted JSON, etc.
                 print(f"❌ An unexpected error occurred: {e}. Starting from token zero.")
                 training_state = self._init_new_training_state()
-            
+
             # Dump the training_state from rank 0 into .json
             with open("local_training_state.json", "w") as f:
                 json.dump(training_state, f)
-        
+
         # Once rank 0 finishes, end the barrier
         if self.world_size > 1:
             self._smart_barrier("state_fetch_end")
-        
+
         # Then every rank (including) loads the dict from "local_training_state.json"
         with open("local_training_state.json", "r") as f:
             final_state_dict = json.load(f)
@@ -483,7 +483,7 @@ class CheckpointDriver:
             curr_global_step -= self.actual_resume_step
         if curr_global_step <=0:
             return False
-        
+
         # Save which interval we will use to calculate if we need to upload
         active_interval = None
 
@@ -499,10 +499,10 @@ class CheckpointDriver:
         # If dictionary was empty (no checkpointing)
         if active_interval is None:
             return False
-        
+
         # return whether the current step is a perfect multiple of the active_interval
         return (curr_global_step % active_interval == 0)
-    
+
     # Resume Training: resume from the correct checkpoint
     # Pass the model and optimizer by reference to be initialized
     # Returns:
@@ -512,13 +512,13 @@ class CheckpointDriver:
     def resume_training(self, model, optimizer):
         # Lazy Load torch to get correct version
         import torch
-        
+
         # Keep track of all the valid steps
         valid_steps = []
         for step, data in self.training_state["checkpoints"].items():
             if data["status"] != "deleted":
                 valid_steps.append(int(step))
-        
+
         # Print messege and return 0 if its brand new
         if not valid_steps:
             if self.rank == 0:
@@ -529,9 +529,9 @@ class CheckpointDriver:
                 "curriculum_level": 0,
                 "rows_processed_at_curr_level": 0,
                 "total_tokens_processed_global": 0,
-                "total_rows_processed_global": 0,  
+                "total_rows_processed_global": 0,
             }, 0
-        
+
         # Get Actual valid resume step (e.g. I deleted the most recent version but it still says otherwise)
         actual_resume_step = max(valid_steps)
         self.actual_resume_step = actual_resume_step
@@ -541,7 +541,7 @@ class CheckpointDriver:
         # Barrier
         if self.world_size > 1:
             self._smart_barrier("weight_download_start")
-        
+
         # Only let rank 0 start downloading (the others will download from the runtime local disk):
         if self.rank == 0:
             print(f"Downloading {filename} from Hub...")
@@ -559,7 +559,7 @@ class CheckpointDriver:
         # Barrier
         if self.world_size > 1:
             self._smart_barrier("weight_download_end")
-        
+
         # Now that the model has been downloaded onto the runtime local disk, let each device download it
         # All ranks load the weights from the local file
         try:
@@ -567,7 +567,7 @@ class CheckpointDriver:
             # Load the checkpoint
             pt_path = os.path.join(".", filename)
             ckpt = torch.load(pt_path, map_location='cpu', weights_only=False)
-            
+
             # Get the model state
             model_state = ckpt['model_state']
 
@@ -581,21 +581,21 @@ class CheckpointDriver:
                     new_state_dict[f'module.{k}'] = v
                 else:
                     new_state_dict[k] = v
-            
+
             # Load the model into dictionary
             model.load_state_dict(new_state_dict, strict=False)
-            
+
             # Load the optmizer
             if optimizer and 'optimizer_state' in ckpt:
                 optimizer.load_state_dict(ckpt['optimizer_state'])
-            
+
             # print success
             if self.rank == 0:
                 print(f"Successfully loaded model and optimizer from Step {actual_resume_step}!")
-            
+
             # Just return the ckpt_entry; Extract the values later
             return ckpt_entry, actual_resume_step
-            
+
         except Exception as e:
             raise RuntimeError(f"Critical Weight Loading Failure: {e}")
 
@@ -603,8 +603,8 @@ class CheckpointDriver:
     # Makes checkpoint entry for training_state
     def save_checkpoint(self, model, optimizer, global_step: int, hardware_string: str, metrics: dict, is_tpu: bool, curriculum_level: int, total_tokens_processed_global: int, total_rows_processed_global: int, rows_processed_at_curr_level: int):
         # Lazy Load Torch
-        import torch 
-        
+        import torch
+
         # Save filename
         step_str = str(global_step)
         filename = f"checkpoint-{step_str}.pt"
@@ -615,11 +615,11 @@ class CheckpointDriver:
 
         if self.rank == 0:
             print(f"Saving model weights to {filename}...")
-        
+
         # Ensure to use module or not to ensure compatibility
         save_dict = {
             "model_state": model.module.state_dict() if hasattr(model, "module") else model.state_dict(),
-            "optimizer_state": optimizer.state_dict() 
+            "optimizer_state": optimizer.state_dict()
         }
 
         # Save using TPU or GPU .save()
@@ -641,17 +641,17 @@ class CheckpointDriver:
             for step, data in self.training_state['checkpoints'].items():
                 if data["status"] == "latest":
                     data["status"] = "history"
-            
+
             # Create new checkpoint entry
             self.training_state["checkpoints"][step_str] = {
                 "status": "latest",
                 "file": filename,
                 "hardware": hardware_string,
-                "curriculum_level": curriculum_level, 
+                "curriculum_level": curriculum_level,
                 "rows_processed_at_curr_level": rows_processed_at_curr_level,
                 "total_rows_processed_global": total_rows_processed_global,
                 "total_tokens_processed_global": total_tokens_processed_global,
-                "metrics": metrics, 
+                "metrics": metrics,
             }
 
             # Dump new training_state into training_state.json
@@ -660,7 +660,7 @@ class CheckpointDriver:
 
             # Ping sidecar by updating UPLOAD_REQUEST.json
             request_data = {
-                "file_to_upload": filename, 
+                "file_to_upload": filename,
                 "step": global_step,
                 "training_state_snapshot": self.training_state
             }
@@ -668,13 +668,13 @@ class CheckpointDriver:
             with open(f"UPLOAD_REQUEST_{global_step}.json.tmp", "w") as f:
                 json.dump(request_data, f)
             os.rename(f"UPLOAD_REQUEST_{global_step}.json.tmp", f"UPLOAD_REQUEST_{global_step}.json")
-            
+
             # Print some bs idk lol
             print(f"Saved weights to local disk + updated training_state.json. Pinging Sidecar for Step{global_step}")
 
         # If more than 1 worker make sure other ranks wait for rank 0
         if self.world_size > 1:
-            self._smart_barrier("save_training_state_end")   
+            self._smart_barrier("save_training_state_end")
 
 
 
@@ -685,10 +685,10 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
     import sys
     import traceback
     import os # Add os
-    
+
     os.environ["HF_TOKEN"] = hw_config.hf_token
-    
-    
+
+
     try:
         # Lazy Load
         import datasets
@@ -699,7 +699,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
         from transformers import AutoTokenizer
         import SpanMLMCollator
         from model import HELMConfig, HELMForMaskedLM
-        
+
 
         # Default for Data Collator
         is_tpu = False
@@ -720,7 +720,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                 if rank == 0:
                     print(f"⚠️ CONFIG MISMATCH: Adjusting world size to {real_world_size}")
                 hw_config.world_size = real_world_size
-        
+
         elif hw_config.device_type == "cuda":
             # Set cuda device to torch
             torch.cuda.set_device(rank)
@@ -731,15 +731,15 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             if hw_config.world_size > 1:
                 import torch.distributed as dist
                 dist.init_process_group("nccl", rank=rank, world_size=hw_config.world_size)
-       
+
         else:
             # Default to CPU just in case
             device = torch.device("cpu")
-        
+
 
         if rank == 0:
             print(f"Rank 0 is online: {device}.")
-        
+
         # Define Tokenizer
         tokenizer = AutoTokenizer.from_pretrained(
             data_config.tokenizer_name, token=hw_config.hf_token
@@ -748,8 +748,8 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
         # Define MLMDataStrategy
         data_strat = MLMDataStrategy(
             rank = rank, world_size = hw_config.world_size, is_tpu = is_tpu,config = data_config, hf_token=hw_config.hf_token
-        ) 
-  
+        )
+
         # Initialize Config
         helm_config = HELMConfig(
             vocab_size=len(tokenizer),
@@ -765,7 +765,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             # model = DDP(model, device_ids=[rank], find_unused_parameters=True)
             # There shouldn't be extra args
             model = DDP(model, device_ids=[rank])
-    
+
         # Define Optimizer
         optimizer = optim.AdamW(model.parameters(), lr = helm_config.lr)
 
@@ -774,7 +774,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
         # Define CE Loss
         loss_fct = nn.CrossEntropyLoss()
-        
+
         # Set data type that will be used
         dtype = hw_config.dtype
 
@@ -803,9 +803,11 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
         # If starting fresh initialize weights
         if actual_resume_step == 0:
-            model.apply(model._init_weights)
-        
-        
+            # Use .module to access the original HELMForMaskedLM if wrapped in DDP
+            unwrapped_model = model.module if hasattr(model, "module") else model
+            unwrapped_model.apply(unwrapped_model._init_weights)
+
+
         # Curriculum Outer Loop (starting from the current curriculum):
         for level in range(start_curr_level,len(data_config.curriculum_subset_names)):
 
@@ -813,17 +815,17 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             model.train()
 
             # Get Profile Level
-            level_profile = hw_config.hardware_profile[level] 
+            level_profile = hw_config.hardware_profile[level]
 
             # Get micro batch size (mb) and use gradient checkpointing (use_ckpt)
             hw_config.batch_size = level_profile["mb"]
-            
+
             # CRITICAL: Unwrap the model first to handle DDP (GPUs) vs Raw (TPUs)
             unwrap_model = model.module if hasattr(model, "module") else model
             # Change the Model Configs using the safely unwrapped model
             unwrap_model.config.use_ckpt = level_profile["use_ckpt"]
             unwrap_model.model.use_ckpt = level_profile["use_ckpt"] # HELMModel caches this
-            
+
             # Save seq_len somewhere just in case if we need to use it
             seq_len = level_profile["sl"]
 
@@ -834,7 +836,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             collator = SpanMLMCollator.SpanMLMCollator(
                 config = data_config, tokenizer = tokenizer
             )
-           
+
             # Define train_dataloader
             train_loader = data_strat.get_mlm_data_loader(
                 collate_fn = collator, skip_rows = rows_processed_at_curr_level, batch_size = hw_config.batch_size, curriculum_level = level, is_train = True
@@ -849,11 +851,11 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             if is_tpu:
                 train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
                 validation_loader = pl.ParallelLoader(validation_loader, [device]).per_device_loader(device)
-                
+
             # ========== TRAINING LOOP ==========
             # Loop through each batch
             for step, batch in enumerate(train_loader):
-                
+
                 # Get Batch's input ids, labels, and attn_mask (we don't have one but just in case) and attach it to device
                 input_ids = batch["input_ids"].to(device)
                 labels = batch["labels"].to(device)
@@ -864,16 +866,16 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                     with torch.autocast(device_type="cuda", dtype=dtype):
                         logits, aux_loss, sparsity_loss = model(input_ids=input_ids, attention_mask=attention_mask, current_step=global_step)
                         # logits: [mb, seq_len, vocab_size] -> [mb*seq_len, vocab_size]
-                        # labels: [mb, seq_len], [mb*seq_len]
+                        # labels: [mb, seq_len] -> [mb*seq_len]
                         ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
                         total_loss = (ce_loss + aux_loss + sparsity_loss) / hw_config.grad_accum_steps
                 else:
                     logits, aux_loss, sparsity_loss = model(input_ids=input_ids, attention_mask=attention_mask, current_step=global_step)
                     # logits: [mb, seq_len, vocab_size] -> [mb*seq_len, vocab_size]
-                    # labels: [mb, seq_len], [mb*seq_len]                    
+                    # labels: [mb, seq_len] -> [mb*seq_len]
                     ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
                     total_loss = (ce_loss + aux_loss + sparsity_loss) / hw_config.grad_accum_steps
-                
+
                 if scaler is not None:
                     scaler.scale(total_loss).backward()
                 else:
@@ -890,6 +892,10 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                     else:
                         optimizer.step()
 
+                    # Normalize the model's weights
+                    unwrapped_model = model.module if hasattr(model, "module") else model
+                    unwrapped_model.normalize_ngpt_matrices()
+
                     # Zero the gradient
                     optimizer.zero_grad()
                     global_step += 1
@@ -902,17 +908,17 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                     rows_processed_at_curr_level +=  rows_this_step
                     total_rows_processed_global += rows_this_step
                     total_tokens_processed_global += tokens_this_step
-                    
+
                     # Use 1 device (rank = 0) to calculate the real loss
                     if rank == 0:
-                        print(f"Step {global_step} | Total Loss: {total_loss.item()*hw_config.grad_accum_steps:.4f} | CE: {ce_loss.item():.4f} | Aux: {aux_loss if isinstance(aux_loss, float) else aux_loss.item():.4f} | Sparsity: {sparsity_loss if isinstance(sparsity_loss, float) else sparsity_loss.item():.4f}")   
+                        print(f"Step {global_step} | Total Loss: {total_loss.item()*hw_config.grad_accum_steps:.4f} | CE: {ce_loss.item():.4f} | Aux: {aux_loss if isinstance(aux_loss, float) else aux_loss.item():.4f} | Sparsity: {sparsity_loss if isinstance(sparsity_loss, float) else sparsity_loss.item():.4f}")
 
                     # Save the model if the time is right (based on interval_dict from CheckpoingConfig)
                     if checkpoint_driver.check_upload_condition(global_step):
                         checkpoint_driver.save_checkpoint(
-                            model = model, 
-                            optimizer = optimizer, 
-                            global_step = global_step, 
+                            model = model,
+                            optimizer = optimizer,
+                            global_step = global_step,
                             hardware_string = hw_config.hardware_string,
                             metrics = {
                                 "Total Loss" :  round(total_loss.item()*hw_config.grad_accum_steps,5),
@@ -920,14 +926,14 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                                 "AUX Loss" : round(aux_loss.item(),5),
                                 "Sparsity" : round(sparsity_loss.item(),5)
 
-                            }, 
-                            is_tpu = is_tpu, 
+                            },
+                            is_tpu = is_tpu,
                             curriculum_level = level,
                             total_tokens_processed_global = total_tokens_processed_global,
                             total_rows_processed_global = total_rows_processed_global,
                             rows_processed_at_curr_level = rows_processed_at_curr_level
                         )
-            
+
             # zero the gradient again just in case
             optimizer.zero_grad()
 
@@ -948,7 +954,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             # Loop through the validation_loader
             for step, batch in enumerate(validation_loader):
                 step_count += 1
-                
+
                 # Get Batch's input ids, labels, and attn_mask and attach it to device
                 input_ids = batch["input_ids"].to(device)
                 labels = batch["labels"].to(device)
@@ -966,11 +972,11 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                         logits, aux_loss, sparsity_loss = model(input_ids=input_ids, attention_mask=attention_mask)
                         ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
                         val_loss = ce_loss + aux_loss + sparsity_loss
-                
+
                 # Get aux and sparsity values
                 current_aux = aux_loss if isinstance(aux_loss, float) else aux_loss.item()
                 current_sparsity = sparsity_loss if isinstance(sparsity_loss, float) else sparsity_loss.item()
-                
+
                 # Add Loss Values
                 total_val_loss += val_loss.item()
                 total_ce_loss += ce_loss.item()
@@ -987,14 +993,14 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                 avg_ce_loss = total_ce_loss / step_count
                 avg_aux_loss = total_aux_loss / step_count
                 avg_sparsity_loss = total_sparsity_loss / step_count
-                
+
                 if rank == 0:
                     print(f"Average Total Loss: {avg_val_loss:.4f} | Avg CE: {avg_ce_loss:.4f} | Avg Aux: {avg_aux_loss:.4f} | Avg Sparsity: {avg_sparsity_loss:.4f}\n")
 
         # Destroy once all of these johns are done
         if hw_config.device_type == "cuda" and hw_config.world_size > 1:
             dist.destroy_process_group()
-    
+
     except Exception as e:
         print(f"\n❌ FATAL WORKER ERROR ON RANK {rank}:")
         traceback.print_exc()
@@ -1015,27 +1021,27 @@ def sidecar_uploader_loop(hf_token, repo_id):
 
     # Forever Loop to constantly check
     while True:
-        
+
         # Check to see if any valid upload requests exist & take the step size
         upload_requests = []
         for file in os.listdir("."):
             if file.startswith("UPLOAD_REQUEST_") and file.endswith(".json"):
                 upload_requests.append(int(file.replace("UPLOAD_REQUEST_", "").replace(".json", "")))
-        
+
         # Sort the list and take the first request
         if upload_requests:
-            
+
             # Get the next upload_request and process that first
             next_upload = sorted(upload_requests)[0]
             upload_request_filename = f"UPLOAD_REQUEST_{next_upload}.json"
 
             # Try to upload the model and training_state.json to HF HUB
             try:
-                
+
                 # Open the UPLOADER_REQUEST.json
                 with open(upload_request_filename, "r") as f:
                     UPLOAD_REQUEST = json.load(f)
-                
+
                 # Get filename and the step
                 model_filename = UPLOAD_REQUEST["file_to_upload"]
                 step = UPLOAD_REQUEST["step"]
@@ -1058,7 +1064,7 @@ def sidecar_uploader_loop(hf_token, repo_id):
                 # Dump the snapshot's training state to a temporary .json
                 with open(f"uploading_training_state.json", "w") as f:
                     json.dump(training_state_snapshot, f)
-                
+
                 # Upload the training_state.json
                 api.upload_file(
                     path_or_fileobj="uploading_training_state.json",
@@ -1066,7 +1072,7 @@ def sidecar_uploader_loop(hf_token, repo_id):
                     repo_id=repo_id,
                     repo_type="model"
                 )
-                
+
 
                 # Squash History to ensure that the repo doesn't hold onto the archives
                 api.super_squash_history(repo_id=repo_id)
@@ -1103,7 +1109,7 @@ if __name__ == "__main__":
         args = (CKPT_CFG.hf_token, CKPT_CFG.model_repo_id)
     )
     uploader_process.start()
-    
+
     # Prepare Hardware Driver
     driver = HardwareDriver(HW_CFG, DATA_CFG, CKPT_CFG)
 
@@ -1112,7 +1118,7 @@ if __name__ == "__main__":
         driver.launch(train_worker)
     except Exception as e:
         print(f"💀 Summ done messed up cuh {e}")
-    
+
     finally:
 
         print("🔪 Initiating Termination Sequence...")
@@ -1136,8 +1142,8 @@ if __name__ == "__main__":
 
             time.sleep(5)
             time_count +=5
-        
+
         # Terminate Sidecars
         uploader_process.terminate()
-        uploader_process.join()      
+        uploader_process.join()
         print("Shutdown complete.")

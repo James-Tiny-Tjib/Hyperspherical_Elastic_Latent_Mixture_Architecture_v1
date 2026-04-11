@@ -956,6 +956,28 @@ class HELMForMaskedLM(PreTrainedModel):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
 
+    # Define Function to normalize_ngpt_matrices
+    def normalize_ngpt_matrices(self):
+        
+        # Define all the projection matrices to normalize
+        keys_to_normalize = (
+            "word_embeddings.weight",
+            "classifier.weight",
+            "attn.qkv.weight",
+            "attn.output.weight",
+            "mlp.mlp_exp.weight",
+            "mlp.mlp_proj.weight",
+            "mlt_vw_rtr.q_down_proj.weight"
+            # ,"mlt_vw_rtr.q_up_proj.weight" # Remove b/c messing up sigmoid scores
+        )
+
+        # Normalize every one of those mats along their dim = 1 (embedding)
+        # The model's weights are transposed (for backprop) so instead of dim = 0, we do dim = 1
+        with torch.no_grad():
+            for name, param in self.named_parameters():
+                if name.endswith(keys_to_normalize):
+                    param.data = justnorm(param.data, dim = 1, eps = 1e-12)
+
     
     # Forward pass
     def forward(self, input_ids, attention_mask, current_step = None):

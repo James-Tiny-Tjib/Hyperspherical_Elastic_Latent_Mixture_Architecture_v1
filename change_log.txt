@@ -94,6 +94,25 @@ Created this log to help me document what is happening
 
 4/9 (1 Hour):
     Finalized phase_03 - now checkpoints pretty good
+    Realized I forgor to normalize the weights before the optimizer, and fixed that
+
+4/11 (3 Hours):
+    Fixed Dependencies to ensure hf-hub works
+    New Dependices scripts exclusively for h100 and g4
+    Testing other HW profiles (for size 1024)
+        - v5e-1 tpu (colab) ✅ 16
+        - v6e-1 tpu (colab) ✅ 16
+        - t4 gpu (colab) ✅ 4
+        - l4 gpu (colab) ✅ 8
+        - a100 gpu (colab) ✅ (32, False = 3.5s) (64, True = 4.2s)
+        - g4 gpu (colab) ✅ (32, False = 2.75s) (64, True = 3.5s)
+        - h100 gpu (colab) ✅  (32, False = 2.9s) (64, True = 3.5s)
+
+        - v5e-8 tpu (kaggle) ✅ 16
+        - p100 tpu (kaggle) ✅ (8, True = 45s) (16, True = 45s, more risky)
+        - t4*2 gpu (kaggle) ✅ (4, True = 17s) (8, True = 17s) (4, False = 14s)
+    
+    Fixed 0th step intialization for multi gpu - unwrapped the model then called _init_weights
 
     
     
