@@ -1,5 +1,8 @@
 %%writefile parallel_hardware_trainer.py
 
+
+does_run_from_work = False
+
 # Imports (Manifesting that my loss curve will look like this )
 import io
 import os
@@ -73,6 +76,10 @@ def get_secret(key_name):
 
     # Local Env
     return os.getenv(key_name)
+
+# Get the float value of something (mainly for losses)
+def to_float(x):
+    return x.item() if hasattr(x, 'item') else float(x)
 
 
 # ==================================================
@@ -416,9 +423,9 @@ class CheckpointDriver:
             self.api.upload_file(
                 path_or_fileobj = fileobj,
                 path_in_repo = "training_state.json",
-                repo_id = self.ckpt_config.model_repo_id,
+                repo_id = self.checkpoint_config.model_repo_id,
                 repo_type = "model",
-                token = self.ckpt_config.hf_token
+                token = self.checkpoint_config.hf_token
             )
         except Exception as e:
             print(f"Failed to push Init State {e}")
@@ -738,7 +745,7 @@ class TelemetryDriver:
 
         # Initialize and resume data logging
         if self.rank == 0 and ckpt_config.use_wandb:
-            if resume_step > 0:
+            if resume_step > 0 and does_run_from_work:
                 wandb.init(
                     entity = ckpt_config.wandb_entity,
                     project = ckpt_config.wandb_project,
@@ -752,8 +759,8 @@ class TelemetryDriver:
                     entity = ckpt_config.wandb_entity,
                     project = ckpt_config.wandb_project,
                     name = ckpt_config.wandb_name,
-                    id = run_id,
-                    resume = "allow",
+                    id = run_id if resume_step > 0 else None,
+                    resume = "allow" if resume_step > 0 else None,
                     config = vars(model_config)
                 )
 
@@ -807,6 +814,7 @@ class TelemetryDriver:
             # Router Metrics
             log_payload[f"layer_{i}/elastic_active_ratio"] = telemetry_dict[f"layer_{i}_elastic_head_ratio"]
             log_payload[f"layer_{i}/tau"] = telemetry_dict[f"layer_{i}_tau"]
+            log_payload[f"layer_{i}/l_i_weights"] = wandb.Histogram(telemetry_dict[f"layer_{i}_l_i_weights"].numpy())
 
             # Average the flat_mask across the batch
             # [b, num_attention_heads, 1, 1] -> [num_attention_heads]
@@ -863,7 +871,9 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
     import sys
     import traceback
     import os # Add os
-
+    
+    if hw_config.hf_token:
+        os.environ["HF_TOKEN"] = hw_config.hf_token
 
     try:
         # Lazy Load
@@ -1090,14 +1100,16 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                     optimizer.zero_grad()
                     global_step += 1
 
+                    report_total_loss = ce_loss.item() + to_float(aux_loss) + to_float(sparsity_loss)
+
                     # Log Data to Wandb
                     if global_step < 100 or global_step % 10 == 0:
                         telemetry_driver.log_step(
                             telemetry_dict = telemetry_dict, 
                             ce_loss = ce_loss.item(), 
-                            aux_loss = aux_loss.item(), 
-                            sparsity_loss = sparsity_loss.item(), 
-                            total_loss = total_loss.item(), 
+                            aux_loss = to_float(aux_loss),
+                            sparsity_loss = to_float(sparsity_loss), 
+                            total_loss = report_total_loss, 
                             global_step = global_step, 
                             is_train = True
                         )
@@ -1114,7 +1126,8 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
                     # Use 1 device (rank = 0) to calculate the real loss
                     if rank == 0:
-                        print(f"Step {global_step} | Total Loss: {total_loss.item()*hw_config.grad_accum_steps:.4f} | CE: {ce_loss.item():.4f} | Aux: {aux_loss if isinstance(aux_loss, float) else aux_loss.item():.4f} | Sparsity: {sparsity_loss if isinstance(sparsity_loss, float) else sparsity_loss.item():.4f}")
+                        print(f"Step {global_step} | Total Loss: {total_loss.item()*hw_config.grad_accum_steps:.4f} | Avg CE: {ce_loss.item():.4f} | Avg Aux: {to_float(aux_loss):.4f} | Avg Sparsity: {to_float(sparsity_loss):.4f}")
+
 
                     # Save the model if the time is right (based on interval_dict from CheckpoingConfig)
                     if checkpoint_driver.check_upload_condition(global_step):
@@ -1124,10 +1137,10 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                             global_step = global_step,
                             hardware_string = hw_config.hardware_string,
                             metrics = {
-                                "Total Loss" :  round(total_loss.item()*hw_config.grad_accum_steps,5),
+                               "Total Loss": round(total_loss*hw_config.grad_accum_steps, 5),
                                 "CE Loss" : round(ce_loss.item(),5),
-                                "AUX Loss" : round(aux_loss.item(),5),
-                                "Sparsity" : round(sparsity_loss.item(),5)
+                                "AUX Loss":   round(to_float(aux_loss), 5),
+                                "Sparsity":   round(to_float(sparsity_loss), 5)
 
                             },
                             is_tpu = is_tpu,
@@ -1215,7 +1228,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                             )
 
                             if rank == 0:
-                                print(f"Average Total Loss: {avg_val_loss:.4f} | Avg CE: {avg_ce_loss:.4f} | Avg Aux: {avg_aux_loss:.4f} | Avg Sparsity: {avg_sparsity_loss:.4f}\n")
+                                print(f"Total Loss: {avg_val_loss*hw_config.grad_accum_steps:.4f} | Avg CE: {avg_ce_loss:.4f} | Avg Aux: {to_float(avg_aux_loss):.4f} | Avg Sparsity: {to_float(avg_sparsity_loss):.4f}\n")
 
         # Destroy once all of these johns are done
         if hw_config.device_type == "cuda" and hw_config.world_size > 1:
