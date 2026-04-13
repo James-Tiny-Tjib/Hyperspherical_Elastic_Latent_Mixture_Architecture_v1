@@ -114,6 +114,11 @@ Created this log to help me document what is happening
     
     Fixed 0th step intialization for multi gpu - unwrapped the model then called _init_weights
 
+4/12:
+    Started to work on Telemetrics
+    Learning what wandb is
+    Thinking about a new project relating to RAGs...
+
     
     
 
