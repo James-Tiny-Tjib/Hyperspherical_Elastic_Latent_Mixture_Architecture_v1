@@ -110,13 +110,16 @@ Created this log to help me document what is happening
 
         - v5e-8 tpu (kaggle) ✅ 16
         - p100 tpu (kaggle) ✅ (8, True = 45s) (16, True = 45s, more risky)
-        - t4*2 gpu (kaggle) ✅ (4, True = 17s) (8, True = 17s) (4, False = 14s)
+        - t4*2 gpu (kaggle) ✅ (4, True = 17s) (8, True = 17s) (4, False = 15s)
     
     Fixed 0th step intialization for multi gpu - unwrapped the model then called _init_weights
 
-4/12:
+4/12 (9 Hours + Dilly Dallying):
     Started to work on Telemetrics
     Learning what wandb is
+    Vibecoded a bunch of the logic (Im too tired for this, but lwk not too bad)
+    Validation Loop happens every 500 steps
+    The thing sort of works
     Thinking about a new project relating to RAGs...
 
     

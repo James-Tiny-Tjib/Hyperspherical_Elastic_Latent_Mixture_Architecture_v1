@@ -1,6 +1,7 @@
 %%writefile parallel_hardware_trainer.py
 
 # Imports (Manifesting that my loss curve will look like this )
+import io
 import os
 import sys
 import time
@@ -153,7 +154,7 @@ class HardwareConfig:
     }
 
     # hardware_string: str = "v6e-1 tpu"
-    hardware_string: str = "a100 gpu"
+    hardware_string: str = "t4*2 gpu"
     hf_token: str = ""
 
 
@@ -202,10 +203,10 @@ class MLMDataConfig:
 
 @dataclass
 class CheckpointConfig:
-    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture"
+    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture_1"
     wandb_entity: str = "jhui16-university-of-maryland"
     wandb_project: str = "HELM-v1-10B-Run"
-    wandb_name: str = "Telemetrics-test1"
+    wandb_name: str = "Telemetrics-test1_1"
     # repo_ver_override: Optional[int] = None
     hf_token: str = ""
     wandb_key: str = ""
@@ -407,6 +408,21 @@ class CheckpointDriver:
             "wandb_run_id": wandb.util.generate_id(),
             "checkpoints": {}
         }
+
+        formatted_json_str = json.dumps(training_state_dict, indent = 4)
+        json_bytes = formatted_json_str.encode('utf-8')
+        fileobj = io.BytesIO(json_bytes)
+        try:
+            self.api.upload_file(
+                path_or_fileobj = fileobj,
+                path_in_repo = "training_state.json",
+                repo_id = self.ckpt_config.model_repo_id,
+                repo_type = "model",
+                token = self.ckpt_config.hf_token
+            )
+        except Exception as e:
+            print(f"Failed to push Init State {e}")
+
         return training_state_dict
 
 
@@ -686,10 +702,6 @@ class CheckpointDriver:
                 "metrics": metrics,
             }
 
-            # Dump new training_state into training_state.json
-            with open("training_state.json", "w") as f:
-                json.dump(self.training_state, f, indent = 4)
-
             # Ping sidecar by updating UPLOAD_REQUEST.json
             request_data = {
                 "file_to_upload": filename,
@@ -713,7 +725,7 @@ class CheckpointDriver:
 class TelemetryDriver:
 
     # Initialize Hardware
-    def __init__(self, rank, run_id, ckpt_config: CheckpointConfig, model_config: HELMConfig):
+    def __init__(self, rank, run_id, model_config, ckpt_config: CheckpointConfig, resume_step = 0):
 
         # Get Rank 
         self.rank = rank
@@ -726,20 +738,30 @@ class TelemetryDriver:
 
         # Initialize and resume data logging
         if self.rank == 0 and ckpt_config.use_wandb:
-            wandb.init(
-                entity = ckpt_config.wandb_entity,
-                project = ckpt_config.wandb_project,
-                name = ckpt_config.wandb_name,
-                id = run_id,
-                resume = "allow",
-                config = vars(model_config)
-            )
-    
+            if resume_step > 0:
+                wandb.init(
+                    entity = ckpt_config.wandb_entity,
+                    project = ckpt_config.wandb_project,
+                    name = ckpt_config.wandb_name,
+                    id = run_id,
+                    resume_from = f"{run_id}?_step={resume_step}",
+                    config = vars(model_config)
+                )
+            else:
+                wandb.init(
+                    entity = ckpt_config.wandb_entity,
+                    project = ckpt_config.wandb_project,
+                    name = ckpt_config.wandb_name,
+                    id = run_id,
+                    resume = "allow",
+                    config = vars(model_config)
+                )
+
     # Log the Data
     def log_step (self, telemetry_dict, ce_loss, aux_loss, sparsity_loss, total_loss, global_step, is_train = True):
 
         # Don't log if rank == 0 or not using wandb
-        if self.rank != 0 or self.ckpt_config.use_wandb:
+        if self.rank != 0 or not self.ckpt_config.use_wandb:
             return
 
         if is_train:
@@ -758,6 +780,7 @@ class TelemetryDriver:
             }
         
         router_heatmap_data = []
+        sigmoid_heatmap_data = []
 
         # Iterate through telemetry dict
         for i in range (self.model_config.num_hidden_layers):
@@ -767,28 +790,20 @@ class TelemetryDriver:
             log_payload[f"layer_{i}/attn_alpha_hist"] = wandb.Histogram(telemetry_dict[f"layer_{i}_attn_alpha_hist"].numpy())
             log_payload[f"layer_{i}/mlp_alpha_hist"] = wandb.Histogram(telemetry_dict[f"layer_{i}_mlp_alpha_hist"].numpy())
             log_payload[f"layer_{i}/suv_hist"] = wandb.Histogram(telemetry_dict[f"layer_{i}_suv_hist"].numpy())
+            log_payload[f"layer_{i}/sigmoid_scores_hist"] = wandb.Histogram(telemetry_dict[f"layer_{i}_sigmoid_scores"].numpy())
             
             # Attention SQK
-            sqk_m = telemetry_dict[f"layer_{i}_sqk_mean"]
-            sqk_s = telemetry_dict[f"layer_{i}_sqk_std"]
-            log_payload[f"layer_{i}/sqk_mean"] = sqk_m
-            log_payload[f"layer_{i}/sqk_upper"] = sqk_m + sqk_s
-            log_payload[f"layer_{i}/sqk_lower"] = sqk_m - sqk_s
+            log_payload[f"layer_{i}/sqk_mean"] = telemetry_dict[f"layer_{i}_sqk_mean"]
+            log_payload[f"layer_{i}/sqk_std"] = telemetry_dict[f"layer_{i}_sqk_std"]
             
             # Attention Alpha Eigen Learning Rate
-            aa_m = telemetry_dict[f"layer_{i}_attn_alpha_mean"]
-            aa_s = telemetry_dict[f"layer_{i}_attn_alpha_std"]
-            log_payload[f"layer_{i}/attn_alpha_mean"] = aa_m
-            log_payload[f"layer_{i}/attn_alpha_upper"] = aa_m + aa_s
-            log_payload[f"layer_{i}/attn_alpha_lower"] = aa_m - aa_s
+            log_payload[f"layer_{i}/attn_alpha_mean"] = telemetry_dict[f"layer_{i}_attn_alpha_mean"]
+            log_payload[f"layer_{i}/attn_alpha_std"] = telemetry_dict[f"layer_{i}_attn_alpha_std"]
 
             # MLP Alpha Eigen Learning Rate
-            ma_m = telemetry_dict[f"layer_{i}_mlp_alpha_mean"]
-            ma_s = telemetry_dict[f"layer_{i}_mlp_alpha_std"]
-            log_payload[f"layer_{i}/mlp_alpha_mean"] = ma_m
-            log_payload[f"layer_{i}/mlp_alpha_upper"] = ma_m + ma_s
-            log_payload[f"layer_{i}/mlp_alpha_lower"] = ma_m - ma_s
-            
+            log_payload[f"layer_{i}/mlp_alpha_mean"] = telemetry_dict[f"layer_{i}_mlp_alpha_mean"]
+            log_payload[f"layer_{i}/mlp_alpha_std"] = telemetry_dict[f"layer_{i}_mlp_alpha_std"]
+
             # Router Metrics
             log_payload[f"layer_{i}/elastic_active_ratio"] = telemetry_dict[f"layer_{i}_elastic_head_ratio"]
             log_payload[f"layer_{i}/tau"] = telemetry_dict[f"layer_{i}_tau"]
@@ -796,35 +811,48 @@ class TelemetryDriver:
             # Average the flat_mask across the batch
             # [b, num_attention_heads, 1, 1] -> [num_attention_heads]
             flat_mask = telemetry_dict[f"layer_{i}_flat_mask"].mean(dim=0).squeeze().numpy()
-            heatmap_data.append(flat_mask)
+            router_heatmap_data.append(flat_mask)
+
+            # Average the sigmoid_scores across the batch
+            # [b, num_attention_heads, 1, 1] -> [num_attention_heads]   
+            sigmoid_scores = telemetry_dict[f"layer_{i}_sigmoid_scores"].mean(dim=0).squeeze().numpy()
+            sigmoid_heatmap_data.append(sigmoid_scores)
         
         # LM_head
         log_payload["lm_head/sz_mean"] = telemetry_dict["lm_head_sz_mean"]
-        sz_m = telemetry_dict["lm_head_sz_mean"]
-        sz_s = telemetry_dict["lm_head_sz_std"]
-        log_payload["lm_head/sz_mean"] = sz_m
-        log_payload["lm_head/sz_upper"] = sz_m + sz_s
-        log_payload["lm_head/sz_lower"] = sz_m - sz_s
+        log_payload["lm_head/sz_std"] = telemetry_dict["lm_head_sz_std"]
+
         log_payload["lm_head/sz_hist"] = wandb.Histogram(telemetry_dict["lm_head_sz_hist"].numpy())
         
         # Generate the 2D Router Heatmap
-        heatmap_matrix = np.stack(heatmap_data) 
-        
+        heatmap_matrix = np.stack(router_heatmap_data) 
         fig, ax = plt.subplots(figsize=(10, 8))
-        cax = ax.matshow(heatmap_matrix, cmap="viridis", vmin=0.0, vmax=1.0)
+        cax = ax.matshow(heatmap_matrix, cmap="cool", vmin=0.0, vmax=1.0)
         fig.colorbar(cax, label="Activation Frequency")
-        
         ax.set_xlabel("Elastic Head Index")
         ax.set_ylabel("Layer")
         ax.set_title(f"Router Head Activation Heatmap (Step {global_step})")
-        ax.set_yticks(range(self.num_layers))
-        
+        ax.set_yticks(range(self.model_config.num_hidden_layers))
+
         log_payload["router/activation_heatmap"] = wandb.Image(fig)
+        plt.close(fig)
+
+        # Generate the 2D Sigmoid Score Heatmap
+        sig_matrix = np.stack(sigmoid_heatmap_data) 
+        fig2, ax2 = plt.subplots(figsize=(10, 8))
+        cax2 = ax2.matshow(sig_matrix, cmap="winter", vmin=0.0, vmax=1.0) # Different colormap to distinguish
+        fig2.colorbar(cax2, label="Mean Sigmoid Confidence")
+        ax2.set_xlabel("Elastic Head Index")
+        ax2.set_ylabel("Layer")
+        ax2.set_title(f"Router Sigmoid Confidence Heatmap (Step {global_step})")
+        ax2.set_yticks(range(self.model_config.num_hidden_layers))
         
+        log_payload["router/confidence_heatmap"] = wandb.Image(fig2)
+        plt.close(fig2)
+
         # Push to W&B
         wandb.log(log_payload, step=global_step)
         
-        plt.close(fig)
 
 
 
@@ -963,7 +991,8 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             rank = rank,
             run_id = run_id, 
             ckpt_config = ckpt_config, 
-            model_config = helm_config
+            model_config = helm_config,
+            resume_step = actual_resume_step
         )
 
         # Curriculum Outer Loop (starting from the current curriculum):
@@ -1173,7 +1202,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
                             # Save telemetry_dict
                             telemetry_dict = unwrapped_model.get_telemetry()
-                            
+
                             # Log the Data to WandB
                             telemetry_driver.log_step(
                                 telemetry_dict = telemetry_dict, 
@@ -1252,13 +1281,14 @@ def sidecar_uploader_loop(hf_token, repo_id):
                 else:
                     print(f"❌ Failed to Upload. {upload_request_filename} was pinged, but {model_filename} does not exist")
 
-                # Dump the snapshot's training state to a temporary .json
-                with open(f"uploading_training_state.json", "w") as f:
-                    json.dump(training_state_snapshot, f)
+                # Format the .json to include whitespace
+                formatted_json_str = json.dumps(training_state_snapshot, indent=4)
+                json_bytes = formatted_json_str.encode('utf-8')
+                fileobj = io.BytesIO(json_bytes)
 
                 # Upload the training_state.json
                 api.upload_file(
-                    path_or_fileobj="uploading_training_state.json",
+                    path_or_fileobj=fileobj,
                     path_in_repo="training_state.json",
                     repo_id=repo_id,
                     repo_type="model"
