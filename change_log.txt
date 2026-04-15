@@ -122,12 +122,15 @@ Created this log to help me document what is happening
     The thing sort of works
     Thinking about a new project relating to RAGs...
 
-4/13 (5 Hours):
+4/13 (6 Hours):
     Finished Telemetrics
     Created Logic to Resume from the last wandb run (i.e stopped at 141, wandb now goes back to 100 and rewrites)
     Actually just learned its a beta-testing feature that I can't use, so I added does_resume_from_work bool
     Added back the sigmoid scores
     Added back l_i_weights
+    Um Tangled Spaghetti Mess ig gl future me
+
+
 
 
     

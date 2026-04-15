@@ -176,6 +176,7 @@ class HardwareConfig:
         default_factory=lambda: HardwareConfig.HARDWARE_PROFILES["cpu"]
     )
     device_type: str = "cpu"
+    validation_step_num: int = 50
 
 
 # ==================================================
@@ -210,10 +211,10 @@ class MLMDataConfig:
 
 @dataclass
 class CheckpointConfig:
-    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture_1"
+    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture-resume-from"
     wandb_entity: str = "jhui16-university-of-maryland"
     wandb_project: str = "HELM-v1-10B-Run"
-    wandb_name: str = "Telemetrics-test1_1"
+    wandb_name: str = "Telemetrics-test1-resume-from"
     # repo_ver_override: Optional[int] = None
     hf_token: str = ""
     wandb_key: str = ""
@@ -413,7 +414,8 @@ class CheckpointDriver:
     def _init_new_training_state(self):
         training_state_dict = {
             "wandb_run_id": wandb.util.generate_id(),
-            "checkpoints": {}
+            "checkpoints": {},
+            "session": 0
         }
 
         formatted_json_str = json.dumps(training_state_dict, indent = 4)
@@ -585,7 +587,7 @@ class CheckpointDriver:
                 "rows_processed_at_curr_level": 0,
                 "total_tokens_processed_global": 0,
                 "total_rows_processed_global": 0,
-            }, 0
+            }, 0, 0
 
         # Get Actual valid resume step (e.g. I deleted the most recent version but it still says otherwise)
         actual_resume_step = max(valid_steps)
@@ -648,8 +650,11 @@ class CheckpointDriver:
             if self.rank == 0:
                 print(f"Successfully loaded model and optimizer from Step {actual_resume_step}!")
 
+            # Update the training_state session num
+            self.training_state["session"] +=1
+
             # Just return the ckpt_entry; Extract the values later
-            return ckpt_entry, actual_resume_step
+            return ckpt_entry, actual_resume_step, self.training_state["session"]
 
         except Exception as e:
             raise RuntimeError(f"Critical Weight Loading Failure: {e}")
@@ -721,7 +726,7 @@ class CheckpointDriver:
             os.rename(f"UPLOAD_REQUEST_{global_step}.json.tmp", f"UPLOAD_REQUEST_{global_step}.json")
 
             # Print some bs idk lol
-            print(f"Saved weights to local disk + updated training_state.json. Pinging Sidecar for Step{global_step}")
+            print(f"Saved weights to local disk + updated training_state.json. Pinging Sidecar for Step {global_step}")
 
         # If more than 1 worker make sure other ranks wait for rank 0
         if self.world_size > 1:
@@ -749,7 +754,7 @@ class TelemetryDriver:
                 wandb.init(
                     entity = ckpt_config.wandb_entity,
                     project = ckpt_config.wandb_project,
-                    name = ckpt_config.wandb_name,
+                    name = ckpt_config.wandb_name[:-6], # Remove the number system
                     id = run_id,
                     resume_from = f"{run_id}?_step={resume_step}",
                     config = vars(model_config)
@@ -976,7 +981,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
         )
 
         # Loading the model/optimizer returns the most recent, valid / undeleted checkpoint
-        ckpt_snapshot, actual_resume_step = checkpoint_driver.resume_training(model, optimizer)
+        ckpt_snapshot, actual_resume_step, session_number = checkpoint_driver.resume_training(model, optimizer)
 
         # Extract the values from the ckpt_snapshot
         start_curr_level = ckpt_snapshot["curriculum_level"]
@@ -995,6 +1000,12 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
         # Extract run_id (for wandb logging)
         run_id = checkpoint_driver.training_state["wandb_run_id"]
+
+        # If we are resuming, but resume_from does not work, make a new run & update run_id
+        if actual_resume_step > 0 and not does_run_from_work:
+            ckpt_config.wandb_name = f"{ckpt_config.wandb_name}-{session_number:05}"
+            run_id = wandb.util.generate_id()
+            checkpoint_driver.training_state["wandb_run_id"] = run_id
 
         # Initialize TelemetryDriver
         telemetry_driver = TelemetryDriver(
@@ -1100,13 +1111,13 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                     optimizer.zero_grad()
                     global_step += 1
 
-                    report_total_loss = ce_loss.item() + to_float(aux_loss) + to_float(sparsity_loss)
+                    report_total_loss = to_float(ce_loss) + to_float(aux_loss) + to_float(sparsity_loss)
 
                     # Log Data to Wandb
                     if global_step < 100 or global_step % 10 == 0:
                         telemetry_driver.log_step(
                             telemetry_dict = telemetry_dict, 
-                            ce_loss = ce_loss.item(), 
+                            ce_loss = to_float(ce_loss), 
                             aux_loss = to_float(aux_loss),
                             sparsity_loss = to_float(sparsity_loss), 
                             total_loss = report_total_loss, 
@@ -1126,7 +1137,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
                     # Use 1 device (rank = 0) to calculate the real loss
                     if rank == 0:
-                        print(f"Step {global_step} | Total Loss: {total_loss.item()*hw_config.grad_accum_steps:.4f} | Avg CE: {ce_loss.item():.4f} | Avg Aux: {to_float(aux_loss):.4f} | Avg Sparsity: {to_float(sparsity_loss):.4f}")
+                        print(f"Step {global_step} | Total Loss: {report_total_loss:.4f} | Avg CE: {to_float(ce_loss):.4f} | Avg Aux: {to_float(aux_loss):.4f} | Avg Sparsity: {to_float(sparsity_loss):.4f}")
 
 
                     # Save the model if the time is right (based on interval_dict from CheckpoingConfig)
@@ -1137,8 +1148,8 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                             global_step = global_step,
                             hardware_string = hw_config.hardware_string,
                             metrics = {
-                               "Total Loss": round(total_loss*hw_config.grad_accum_steps, 5),
-                                "CE Loss" : round(ce_loss.item(),5),
+                               "Total Loss": round(report_total_loss, 5),
+                                "CE Loss" : round(to_float(ce_loss),5),
                                 "AUX Loss":   round(to_float(aux_loss), 5),
                                 "Sparsity":   round(to_float(sparsity_loss), 5)
 
@@ -1167,11 +1178,12 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                         total_ce_loss = 0.0
                         total_aux_loss = 0.0
                         total_sparsity_loss = 0.0
-                        step_count = 0
 
                         # Loop through the validation_loader
                         for step, batch in enumerate(validation_loader):
-                            step_count += 1
+                            
+                            if step > hw_config.validation_step_num:
+                                break
 
                             # Get Batch's input ids, labels, and attn_mask and attach it to device
                             input_ids = batch["input_ids"].to(device)
@@ -1191,23 +1203,22 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                                     ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
                                     val_loss = ce_loss + aux_loss + sparsity_loss
 
-                            # Get aux and sparsity values
-                            current_aux = aux_loss if isinstance(aux_loss, float) else aux_loss.item()
-                            current_sparsity = sparsity_loss if isinstance(sparsity_loss, float) else sparsity_loss.item()
-
                             # Add Loss Values
-                            total_val_loss += val_loss.item()
-                            total_ce_loss += ce_loss.item()
-                            total_aux_loss += current_aux
-                            total_sparsity_loss += current_sparsity
+                            total_val_loss += to_float(val_loss)
+                            total_ce_loss += to_float(ce_loss)
+                            total_aux_loss += to_float(aux_loss)
+                            total_sparsity_loss += to_float(sparsity_loss)
+
+                            if rank == 0 and step % 10 == 0:
+                                print(f"Completed Validation Step {step}/{hw_config.validation_step_num} - we are alive")
 
 
                         # Calculate and print the final averages once the loop naturally finishes
-                        if step_count > 0:
-                            avg_val_loss = total_val_loss / step_count
-                            avg_ce_loss = total_ce_loss / step_count
-                            avg_aux_loss = total_aux_loss / step_count
-                            avg_sparsity_loss = total_sparsity_loss / step_count
+                        if hw_config.validation_step_num > 0:
+                            avg_val_loss = total_val_loss / hw_config.validation_step_num
+                            avg_ce_loss = total_ce_loss / hw_config.validation_step_num
+                            avg_aux_loss = total_aux_loss / hw_config.validation_step_num
+                            avg_sparsity_loss = total_sparsity_loss / hw_config.validation_step_num
 
                             # Normalize the model's weights
                             unwrapped_model = model.module if hasattr(model, "module") else model
@@ -1228,7 +1239,10 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                             )
 
                             if rank == 0:
-                                print(f"Total Loss: {avg_val_loss*hw_config.grad_accum_steps:.4f} | Avg CE: {avg_ce_loss:.4f} | Avg Aux: {to_float(avg_aux_loss):.4f} | Avg Sparsity: {to_float(avg_sparsity_loss):.4f}\n")
+                                print(f"Total Loss: {avg_val_loss:.4f} | CE: {avg_ce_loss:.4f} | Aux: {avg_aux_loss:.4f} | Sparsity: {avg_sparsity_loss:.4f}")
+                        
+                        # Call model.train
+                        model.train()   
 
         # Destroy once all of these johns are done
         if hw_config.device_type == "cuda" and hw_config.world_size > 1:
@@ -1327,6 +1341,21 @@ def sidecar_uploader_loop(hf_token, repo_id):
 
 
 if __name__ == "__main__":
+
+    # Allow to kill all processes / end them correctly --------
+    import signal
+    import sys
+
+    def graceful_shutdown(signum, frame):
+        print(f"\n⚠️ Caught termination signal ({signum}). Forcing graceful shutdown...")
+        # Raising SystemExit forces Python to execute your 'finally' block!
+        sys.exit(0)
+
+    # Catch Kaggle's Stop button (SIGTERM) and Keyboard Interrupts (SIGINT)
+    signal.signal(signal.SIGTERM, graceful_shutdown)
+    signal.signal(signal.SIGINT, graceful_shutdown)
+    # ---------------------------------------------------------
+
     # Ensure environment is primed for TPU PJRT
     for key in ["XRT_TPU_CONFIG", "PJRT_SELECT_DEVICE", "TPU_PROCESS_ADDRESSES"]:
         os.environ.pop(key, None)
