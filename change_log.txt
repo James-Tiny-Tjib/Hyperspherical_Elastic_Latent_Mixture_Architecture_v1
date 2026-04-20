@@ -130,6 +130,12 @@ Created this log to help me document what is happening
     Added back l_i_weights
     Um Tangled Spaghetti Mess ig gl future me
 
+4/20 (2 Hours):
+    Fixed fork_from so that 100% works
+    Testing resume_from now
+
+
+
 
 
 
@@ -138,6 +144,6 @@ Created this log to help me document what is happening
 
 
 Goals:
-    Telemetrics
+    Fix Router Implementation and Behavior 
     TRAIN DIS SHIIIIII RAWWWHHHHHHHH 😈😈😈😈😈
 

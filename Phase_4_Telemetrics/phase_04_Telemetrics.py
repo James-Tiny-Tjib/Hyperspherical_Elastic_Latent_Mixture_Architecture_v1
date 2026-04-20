@@ -1,7 +1,8 @@
 %%writefile parallel_hardware_trainer.py
 
 
-does_run_from_work = False
+DOES_RESUME_FROM_WORK = False
+TESTING_MODE = True
 
 # Imports (Manifesting that my loss curve will look like this )
 import io
@@ -211,11 +212,10 @@ class MLMDataConfig:
 
 @dataclass
 class CheckpointConfig:
-    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture-resume-from"
+    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture-fork_from_test"
     wandb_entity: str = "jhui16-university-of-maryland"
     wandb_project: str = "HELM-v1-10B-Run"
-    wandb_name: str = "Telemetrics-test1-resume-from"
-    # repo_ver_override: Optional[int] = None
+    wandb_name: str = "fork_from_test"
     hf_token: str = ""
     wandb_key: str = ""
     use_wandb: bool = True
@@ -383,10 +383,10 @@ class CheckpointDriver:
     # Initialize Checkpoint Driver
     def __init__(self, hw_config: HardwareConfig, ckpt_config: CheckpointConfig, rank: int, world_size: int):
         self.hw_config = hw_config
-        self.checkpoint_config = ckpt_config
+        self.ckpt_config = ckpt_config
         self.rank = rank
         self.world_size = world_size
-        self.api = HfApi(token=self.checkpoint_config.hf_token)
+        self.api = HfApi(token=self.ckpt_config.hf_token)
         self.actual_resume_step = None
 
         # Just print to ensure shit is moving
@@ -413,7 +413,6 @@ class CheckpointDriver:
     # Initialize new checkpoint dictionary
     def _init_new_training_state(self):
         training_state_dict = {
-            "wandb_run_id": wandb.util.generate_id(),
             "checkpoints": {},
             "session": 0
         }
@@ -425,9 +424,9 @@ class CheckpointDriver:
             self.api.upload_file(
                 path_or_fileobj = fileobj,
                 path_in_repo = "training_state.json",
-                repo_id = self.checkpoint_config.model_repo_id,
+                repo_id = self.ckpt_config.model_repo_id,
                 repo_type = "model",
-                token = self.checkpoint_config.hf_token
+                token = self.ckpt_config.hf_token
             )
         except Exception as e:
             print(f"Failed to push Init State {e}")
@@ -441,9 +440,9 @@ class CheckpointDriver:
         # Try to take the repo file's file paths
         repo_files = None
         try:
-            repo_files = list(self.api.list_repo_files(repo_id = self.checkpoint_config.model_repo_id))
+            repo_files = list(self.api.list_repo_files(repo_id = self.ckpt_config.model_repo_id))
         except RepositoryNotFoundError:
-            raise RepositoryNotFoundError(f"❌ Repo: \"{self.checkpoint_config.model_repo_id}\" was not found when trying to update deletion status")
+            raise RepositoryNotFoundError(f"❌ Repo: \"{self.ckpt_config.model_repo_id}\" was not found when trying to update deletion status")
 
 
         # Loop Through every checkpoint and switch the status if necessary
@@ -470,27 +469,33 @@ class CheckpointDriver:
             # Attempt to pull the training_state.json from hub
             try:
                 # Try Downlaoding
-                path = hf_hub_download(repo_id=self.checkpoint_config.model_repo_id, filename = filename, repo_type = "model")
+                path = hf_hub_download(
+                    repo_id=self.ckpt_config.model_repo_id, 
+                    filename = filename, 
+                    repo_type = "model", 
+                    token = self.ckpt_config.hf_token
+                )
+
                 with open(path, "r") as f:
                     training_state = json.load(f)
 
                 # Successfully loaded
-                print(f"✅ {filename} loaded successfully from {self.checkpoint_config.model_repo_id}")
+                print(f"✅ {filename} loaded successfully from {self.ckpt_config.model_repo_id}")
                 training_state = self._deletion_status_updates(training_state)
 
             # If the repo doesn't exist, make the repo
             except RepositoryNotFoundError:
                 # Print Error Statements
-                print(f"⚠️ Repo: \"{self.checkpoint_config.model_repo_id}\" was not found")
-                print(f"🏗️ Creating Repo: {self.checkpoint_config.model_repo_id}")
+                print(f"⚠️ Repo: \"{self.ckpt_config.model_repo_id}\" was not found")
+                print(f"🏗️ Creating Repo: {self.ckpt_config.model_repo_id}")
 
                 # Create Repo
                 create_repo(
-                    repo_id = self.checkpoint_config.model_repo_id,
-                    token = self.checkpoint_config.hf_token,
+                    repo_id = self.ckpt_config.model_repo_id,
+                    token = self.ckpt_config.hf_token,
                     repo_type = "model",
                     private = False,
-                    exist_ok = False
+                    exist_ok = False,
                 )
 
                 # Make new training_state dict
@@ -499,7 +504,7 @@ class CheckpointDriver:
             # The repo exists, but it's empty or doesn't have the state file yet
             except EntryNotFoundError:
                 # Print info
-                print(f"⚠️ {self.checkpoint_config.model_repo_id} exists, but no {filename} found. Starting fresh.")
+                print(f"⚠️ {self.ckpt_config.model_repo_id} exists, but no {filename} found. Starting fresh.")
                 training_state = self._init_new_training_state()
 
             # Unknown Error
@@ -536,7 +541,7 @@ class CheckpointDriver:
     # Check to see if a checkpoint should be uploaded
     def check_upload_condition(self, curr_global_step):
         # Subtract offset if start_from_global (it treated step 0 = last checkpoint's step value)
-        if not self.checkpoint_config.start_from_global:
+        if not self.ckpt_config.start_from_global:
             curr_global_step -= self.actual_resume_step
         if curr_global_step <=0:
             return False
@@ -545,10 +550,10 @@ class CheckpointDriver:
         active_interval = None
 
         # Iterate through the sorted keys
-        for threshold in sorted(self.checkpoint_config.interval_dict.keys()):
+        for threshold in sorted(self.ckpt_config.interval_dict.keys()):
             # If our curr_global_step is bigger than threshold, save it's value
             if curr_global_step >= threshold:
-                active_interval = self.checkpoint_config.interval_dict[threshold]
+                active_interval = self.ckpt_config.interval_dict[threshold]
             else:
                 # else we break since we haven't to this threshold yet
                 break
@@ -587,6 +592,7 @@ class CheckpointDriver:
                 "rows_processed_at_curr_level": 0,
                 "total_tokens_processed_global": 0,
                 "total_rows_processed_global": 0,
+                "run_id": wandb.util.generate_id() if self.ckpt_config.use_wandb else ""
             }, 0, 0
 
         # Get Actual valid resume step (e.g. I deleted the most recent version but it still says otherwise)
@@ -604,10 +610,10 @@ class CheckpointDriver:
             print(f"Downloading {filename} from Hub...")
             try:
                 hf_hub_download(
-                    repo_id = self.checkpoint_config.model_repo_id,
+                    repo_id = self.ckpt_config.model_repo_id,
                     filename = filename,
                     repo_type = "model",
-                    token = self.checkpoint_config.hf_token,
+                    token = self.ckpt_config.hf_token,
                     local_dir = "."
                 )
             except Exception as e:
@@ -661,13 +667,13 @@ class CheckpointDriver:
 
     # Saves the model to a .pt file
     # Makes checkpoint entry for training_state
-    def save_checkpoint(self, model, optimizer, global_step: int, hardware_string: str, metrics: dict, is_tpu: bool, curriculum_level: int, total_tokens_processed_global: int, total_rows_processed_global: int, rows_processed_at_curr_level: int):
+    def save_checkpoint(self, model, optimizer, global_step: int, hardware_string: str, metrics: dict, is_tpu: bool, curriculum_level: int, total_tokens_processed_global: int, total_rows_processed_global: int, rows_processed_at_curr_level: int, run_id = ""):
         # Lazy Load Torch
         import torch
 
         # Save filename
         step_str = str(global_step)
-        filename = f"checkpoint-{step_str}.pt"
+        filename = f"checkpoint-{global_step:06d}.pt"
 
         # If more than 1 worker, start barrier
         if self.world_size > 1:
@@ -712,6 +718,7 @@ class CheckpointDriver:
                 "total_rows_processed_global": total_rows_processed_global,
                 "total_tokens_processed_global": total_tokens_processed_global,
                 "metrics": metrics,
+                "run_id": run_id
             }
 
             # Ping sidecar by updating UPLOAD_REQUEST.json
@@ -748,32 +755,58 @@ class TelemetryDriver:
         # Get modeL_config
         self.model_config = model_config
 
+        # Save new run object
+        self.run = None
+
+        # Save run type
+        # "init"
+        # "resume_from"
+        # "fork_from"
+        self.run_type = None
+
         # Initialize and resume data logging
         if self.rank == 0 and ckpt_config.use_wandb:
-            if resume_step > 0 and does_run_from_work:
-                wandb.init(
-                    entity = ckpt_config.wandb_entity,
-                    project = ckpt_config.wandb_project,
-                    name = ckpt_config.wandb_name[:-6], # Remove the number system
-                    id = run_id,
-                    resume_from = f"{run_id}?_step={resume_step}",
-                    config = vars(model_config)
-                )
-            else:
-                wandb.init(
+
+            # Starting Fresh
+            if (resume_step == 0):
+                self.run = wandb.init(
                     entity = ckpt_config.wandb_entity,
                     project = ckpt_config.wandb_project,
                     name = ckpt_config.wandb_name,
-                    id = run_id if resume_step > 0 else None,
-                    resume = "allow" if resume_step > 0 else None,
+                    id = run_id,
                     config = vars(model_config)
                 )
+                self.run_type = "init"
+
+            # If continuing and resume_from_work
+            elif DOES_RESUME_FROM_WORK:
+                self.run = wandb.init(
+                        entity = ckpt_config.wandb_entity,
+                        project = ckpt_config.wandb_project,
+                        name = ckpt_config.wandb_name,
+                        id = run_id,
+                        resume_from = f"{run_id}?_step={resume_step}",
+                        config = vars(model_config)
+                )
+                self.run_type = "resume_from"
+
+            # Else use fork_from for better organization
+            else:
+                self.run = wandb.init(
+                        entity = ckpt_config.wandb_entity,
+                        project = ckpt_config.wandb_project,
+                        name = ckpt_config.wandb_name,
+                        fork_from = f"{run_id}?_step={resume_step}",
+                        config = vars(model_config)
+                )
+                self.run_type = "fork_from"
+
 
     # Log the Data
     def log_step (self, telemetry_dict, ce_loss, aux_loss, sparsity_loss, total_loss, global_step, is_train = True):
 
         # Don't log if rank == 0 or not using wandb
-        if self.rank != 0 or not self.ckpt_config.use_wandb:
+        if self.rank != 0 or not self.ckpt_config.use_wandb or self.run is None:
             return
 
         if is_train:
@@ -999,13 +1032,11 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             unwrapped_model.apply(unwrapped_model._init_weights)
 
         # Extract run_id (for wandb logging)
-        run_id = checkpoint_driver.training_state["wandb_run_id"]
+        run_id = ckpt_snapshot["run_id"]
 
-        # If we are resuming, but resume_from does not work, make a new run & update run_id
-        if actual_resume_step > 0 and not does_run_from_work:
+        # If we aren't using resume_from, have incremental session number names
+        if not DOES_RESUME_FROM_WORK:
             ckpt_config.wandb_name = f"{ckpt_config.wandb_name}-{session_number:05}"
-            run_id = wandb.util.generate_id()
-            checkpoint_driver.training_state["wandb_run_id"] = run_id
 
         # Initialize TelemetryDriver
         telemetry_driver = TelemetryDriver(
@@ -1142,6 +1173,11 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
                     # Save the model if the time is right (based on interval_dict from CheckpoingConfig)
                     if checkpoint_driver.check_upload_condition(global_step):
+
+                        # Ensure correct run_id is saved (should only change when using fork_from)
+                        if telemetry_driver.run_type == "fork_from":
+                            run_id = telemetry_driver.run.id
+
                         checkpoint_driver.save_checkpoint(
                             model = model,
                             optimizer = optimizer,
@@ -1158,12 +1194,13 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                             curriculum_level = level,
                             total_tokens_processed_global = total_tokens_processed_global,
                             total_rows_processed_global = total_rows_processed_global,
-                            rows_processed_at_curr_level = rows_processed_at_curr_level
+                            rows_processed_at_curr_level = rows_processed_at_curr_level,
+                            run_id = run_id
                         )
 
                     # ========== VALIDATION LOOP ==========
                     # Log Valdiation every 500 steps
-                    if global_step % 500 == 0:
+                    if global_step % (500 if not TESTING_MODE else 50) == 0:
                         
                         print("⏳ Calculating Validation...")
 
@@ -1361,14 +1398,29 @@ if __name__ == "__main__":
         os.environ.pop(key, None)
     os.environ["PJRT_DEVICE"] = "TPU"
 
-    # Get API Keys
+    # Set wandb key to None
+    wandb_key = None
+
+    # Get dummy ckpt_config to check if use_wandb is true:
+    dummy_ckpt_cfg = CheckpointConfig()
+
+    # Get wandb api key if wandb is being used
+    if dummy_ckpt_cfg.use_wandb:
+        wandb_key = get_secret("WANDB_API_KEY")
+
+    # HF Token (must)
     hf_token = get_secret("HF_TOKEN")
-    wandb_key = get_secret("WANDB_API_KEY")
 
     # Initialize all configs
     HW_CFG = HardwareConfig(hf_token = hf_token)
     DATA_CFG = MLMDataConfig()
-    CKPT_CFG = CheckpointConfig(hf_token = hf_token, wandb_key = wandb_key)
+    CKPT_CFG = None
+
+    if not TESTING_MODE:
+        CKPT_CFG = CheckpointConfig(hf_token = hf_token, wandb_key = wandb_key if wandb_key is not None else "")
+    else:
+        CKPT_CFG = CheckpointConfig(hf_token = hf_token, wandb_key = wandb_key if wandb_key is not None else "", interval_dict = {0:10})
+
 
     # Log into wandb if we are logging in:
     if wandb_key and CKPT_CFG.use_wandb:
