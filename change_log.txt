@@ -134,7 +134,19 @@ Created this log to help me document what is happening
     Fixed fork_from so that 100% works
     Testing resume_from now
 
+4/26 (1.5 Hours):
+    wandb resume_from works
+    Phase 4 fully complete
+    Added extra_snippets which includes a way to directly write the secrets to 
+    enviornmental vars (colab compatibility)
+    Hmm v5e-1 and v5e-8 feel very similar in speed
+    Learn that the data is the bottle neck. I must fix it
+    I also learned that my TPU gradient shit is cooked too (l_i_weights + tau is not moving)
 
+
+4/27 (3 Hours):
+    made progress on fixing the dataloaders
+    Claude pointed a bunch of problems
 
 
 
