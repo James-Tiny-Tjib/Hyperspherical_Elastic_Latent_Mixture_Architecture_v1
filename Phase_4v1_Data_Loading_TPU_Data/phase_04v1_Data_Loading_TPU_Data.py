@@ -2,7 +2,7 @@
 
 
 DOES_RESUME_FROM_WORK = False
-TESTING_MODE = True
+TESTING_MODE = False
 
 # Imports (Manifesting that my loss curve will look like this)
 import io
@@ -19,9 +19,9 @@ import numpy as np
 import multiprocessing
 import pyarrow.parquet as pq
 import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader
 from dataclasses import dataclass, field
 from datasets import load_dataset, Dataset
-from torch.utils.data import Dataset, DataLoader
 from typing import Optional, List, Union, ClassVar, Dict, Any
 from huggingface_hub import hf_hub_download, create_repo, HfApi
 from huggingface_hub.utils import RepositoryNotFoundError, EntryNotFoundError
@@ -163,7 +163,7 @@ class HardwareConfig:
     }
 
     # hardware_string: str = "v6e-1 tpu"
-    hardware_string: str = "t4*2 gpu"
+    # hardware_string: str = "t4*2 gpu"
     hf_token: str = ""
 
 
@@ -216,10 +216,10 @@ class MLMDataConfig:
 
 @dataclass
 class CheckpointConfig:
-    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture-fork_from_test"
+    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture"
     wandb_entity: str = "jhui16-university-of-maryland"
     wandb_project: str = "HELM-v1-10B-Run"
-    wandb_name: str = "fork_from_test"
+    wandb_name: str = "dachshunds"
     hf_token: str = ""
     wandb_key: str = ""
     use_wandb: bool = True
@@ -319,31 +319,40 @@ class MLMDataStrategy:
 
     # Create get_mlm_data_loader function
     # Note: This only bascially works with the dataset created by prepare_data.py
-    def get_mlm_data_loader(self, parquet_file_path: str, collate_fn = None, skip_rows = 0, batch_size = 1, parquet_index = 1, is_train = True, prev_world_size = 1):
+    def get_mlm_data_loader(
+        self, 
+        parquet_file_path: str, 
+        collate_fn = None, 
+        skip_rows = 0, 
+        batch_size = 1, 
+        parquet_index = 1, 
+        is_train = True,
+        # prev_world_size = 1
+        ):
 
         # Get HF Dataset obj from parquet
-        dataset = Dataset.from_parquet(path_or_paths = parquet_file_path, keep_in_memory = True)
-
-        # If we're Parallel Processing, Shard the Data so that each device gets a different slice of data
-        if self.world_size > 1 and is_train:
-            dataset = dataset.shard(num_shards = self.world_size, index = self.rank)
-
+        dataset = datasets.from_parquet(path_or_paths = parquet_file_path, keep_in_memory = True)
+        
         # Shuffle after you shard
         # Make sure you set a seed to ensure the I don't use the same data again
         # + index to keep this more random but predictable for reproductibility
         dataset = dataset.shuffle(seed = 67 + parquet_index)
 
         # Skip examples after you shuffle based on the specific seed:
-        if skip_rows > 0 and is_train and self.world_size > 1:
-            per_rank_skip (skip_rows + self.world_size -1 ) // self.world_size
-        else:
-            per_rank_skip = skip_rows
+        if skip_rows > 0 and is_train:
 
-        if per_rank_skip >= len(dataset):
-            dataset = dataset.select(range(0))   # empty
-        elif per_rank_skip > 0:
-            dataset = dataset.select(range(per_rank_skip, len(dataset)))
+            # If skip rows is somehow over the dataset, return an empty dataset
+            if skip_rows >= len(dataset):
+                dataset = dataset.select(range(0))   # empty
+            # Else skip skip_rows and grab remaining data
+            else:  
+                dataset = dataset.select(range(skip_rows, len(dataset)))
 
+        # If we're Parallel Processing, Shard the Data so that each device gets a different slice of data
+        if self.world_size > 1 and is_train:
+            dataset = dataset.shard(num_shards = self.world_size, index = self.rank)
+
+        # Dataloader
         data_loader = DataLoader(
             dataset,
             batch_size = batch_size,
@@ -645,6 +654,7 @@ class CheckpointDriver:
             # return 0,0
             self.actual_resume_step = 0
             return {
+                "hardware": self.hw_config.hardware_string,
                 "curriculum_level": 0,
                 "rows_processed_at_curr_level": 0,
                 "total_tokens_processed_global": 0,
@@ -1100,7 +1110,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
         total_tokens_processed_global = ckpt_snapshot["total_tokens_processed_global"]
         parquet_index = ckpt_snapshot["parquet_index"]
         total_rows_processed_parquet = ckpt_snapshot["total_rows_processed_parquet"]
-        prev_world_size = hw_config.HARDWARE_PROFILES[ckpt_snapshot["hardware"]]["ws"]
+        # prev_world_size = hw_config.HARDWARE_PROFILES[ckpt_snapshot["hardware"]]["ws"]
 
         # Set the global step to where we left off from the previous checkpoint
         global_step = actual_resume_step
@@ -1167,7 +1177,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                 batch_size = hw_config.batch_size, 
                 parquet_index = parquet_index, 
                 is_train = False,
-                prev_world_size = prev_world_size
+                # prev_world_size = prev_world_size
             )
             
             # var holding a new train_file_path so it can be preloaded without training hiccups
@@ -1209,7 +1219,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                     batch_size = hw_config.batch_size, 
                     parquet_index = parquet_index, 
                     is_train = True,
-                    prev_world_size = prev_world_size
+                    # prev_world_size = prev_world_size
 
                 )
                 
@@ -1419,7 +1429,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                             model.train()   
                     
                 if rank == 0:
-                print(f"📦 Finished parquet {parquet_index} (level {level}). Advancing.")
+                    print(f"📦 Finished parquet {parquet_index} (level {level}). Advancing.")
 
                 # Delete the consumed parquet so disk doesn't fill up
                 data_strat.delete_parquet(train_file_path)
@@ -1447,8 +1457,13 @@ def sidecar_uploader_loop(hf_token, repo_id):
     import os
     import json
     import time
+    import signal
     from datetime import datetime, timezone
     from huggingface_hub import HfApi
+
+    # Ignore stop signals
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
 
     # Get HF API Token to upload
     api = HfApi(token=hf_token)
@@ -1623,6 +1638,6 @@ if __name__ == "__main__":
             time_count +=5
 
         # Terminate Sidecars
-        uploader_process.terminate()
+        uploader_process.kill()
         uploader_process.join()
         print("Shutdown complete.")
