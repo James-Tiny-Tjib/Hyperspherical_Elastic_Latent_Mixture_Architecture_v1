@@ -26,7 +26,7 @@ def repair_environment():
                 sys.executable, "-m", "pip", *common_args,
                 "torch==2.8.0",
                 "torchvision==0.23.0",
-                "torch_xla[tpu]==2.8.0",
+                "torch_xla[tpu,pallas]==2.8.0",
                 # 🩹 THE FIX: Unpinned numpy, pyarrow, and fsspec to allow Numpy 2.0+ compatibility
                 "numpy", "pyarrow", "fsspec",
                 "protobuf>=5.28.0",

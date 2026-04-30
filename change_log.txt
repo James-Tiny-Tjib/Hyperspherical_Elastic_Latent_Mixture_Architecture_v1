@@ -144,9 +144,36 @@ Created this log to help me document what is happening
     I also learned that my TPU gradient shit is cooked too (l_i_weights + tau is not moving)
 
 
-4/27 (3 Hours):
+4/27 (5 Hours):
     made progress on fixing the dataloaders
     Claude pointed a bunch of problems
+    fixed the data loading issues: We shuffle, skip, then shard (but we can't shard after scrambling, so we had to use select)
+    Fixed a bunch of tiny errors
+    termindation during a checkpoint is to be s
+    Moved the Gradient Clipping hook from model.py to the training loop to prevent TPU from not updating learnable params
+    Actually just learned that teh problem came from the autocasting making updates that are too big
+    Therefore, we need to get rid of casting everything via the enviornmental vars and actually casting them to the right thing
+    For now, we'll just cast everything to bf16 (maybe later we'll fix this)
+
+4/29
+    Fixed all of it
+    Deleted env var for XLA to cast everything to bf16 (since it didn't allow for small updates + large updates at the same time)
+    Mixed precision must be acheived in order for the gradient to be unforzen for l_i_weights, tau, and suv_hist
+    Added probes to find which mats caused it be fp32
+    Casted everything to the correct dtype relative to their inputs
+    Implement Pallas Flash Attention for XLA
+    Lowered microbatches from 16 -> 8 (OOM) for TPUs. GPUs were doing correct mixed precision the whole time. No changes for GPU profiles
+    Graceful Shutdown is cooked. Need fixing
+    Data loading works (kinda jank where it pauses literally everything to load a parquet).
+    80 seconds = 100 steps, 163840 tokens/sec throughput 🥶🥶🥶
+    Our code worked too good: We filled up our runtime with checkpoints before we were able to even upload all of them
+    In reality, our sidecar died. 
+
+4/30 (1/2 Hour):
+    
+
+
+
 
 
 
@@ -156,6 +183,9 @@ Created this log to help me document what is happening
 
 
 Goals:
+    Create respawn mechanism for the sidecar
+    create async process to load the parquets without pausing the entire script
+    fix graceful termination
     Fix Router Implementation and Behavior 
     TRAIN DIS SHIIIIII RAWWWHHHHHHHH 😈😈😈😈😈
 

@@ -39,7 +39,7 @@ for key in ["XRT_TPU_CONFIG", "PJRT_SELECT_DEVICE", "TPU_PROCESS_ADDRESSES"]:
     os.environ.pop(key, None)
 os.environ["PJRT_DEVICE"] = "TPU"
 # Add the framework quarantine just in case!
-os.environ["JAX_PLATFORMS"] = "cpu"
+# os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 # Prevent C++ thread deadlocks during 10B token streaming
@@ -52,8 +52,6 @@ pa.set_io_thread_count(1)
 os.environ["USE_TORCH"] = "1"
 os.environ["USE_TF"] = "0"
 os.environ["USE_JAX"] = "0"
-os.environ["XLA_USE_BF16"] = "1"
-os.environ["XLA_DOWNCAST_BF16"] = "1"
 
 # Force Path Refresh
 if 'site' in sys.modules:
@@ -96,13 +94,13 @@ class HardwareConfig:
     HARDWARE_PROFILES = {
         "v5e-8": {
             "ws": 8, "target": 128, "dtype": torch.bfloat16,"use_scaler": False,
-            0: {"mb": 16, "use_ckpt": False, "sl": 1024},
+            0: {"mb": 8, "use_ckpt": False, "sl": 1024},
             1: {"mb": 4, "use_ckpt": False, "sl": 2048},
             2: {"mb": 1, "use_ckpt": False, "sl": 4096},
         },
         "v5e-1": {
             "ws": 1, "target": 128, "dtype": torch.bfloat16,"use_scaler": False,
-            0: {"mb": 16, "use_ckpt": False, "sl": 1024},
+            0: {"mb": 8, "use_ckpt": False, "sl": 1024},
             1: {"mb": 4, "use_ckpt": False, "sl": 2048},
             2: {"mb": 1, "use_ckpt": False, "sl": 4096},
         },
@@ -162,7 +160,7 @@ class HardwareConfig:
         }
     }
 
-    # hardware_string: str = "v6e-1 tpu"
+    hardware_string: str = "v5e-8 tpu"
     # hardware_string: str = "t4*2 gpu"
     hf_token: str = ""
 
@@ -216,10 +214,10 @@ class MLMDataConfig:
 
 @dataclass
 class CheckpointConfig:
-    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture"
+    model_repo_id: str = "JamesResearch1216/HELM-v1-Architecture-final-4v1-test"
     wandb_entity: str = "jhui16-university-of-maryland"
     wandb_project: str = "HELM-v1-10B-Run"
-    wandb_name: str = "dachshunds"
+    wandb_name: str = "final-4v1-test"
     hf_token: str = ""
     wandb_key: str = ""
     use_wandb: bool = True
@@ -258,10 +256,14 @@ class MLMDataStrategy:
     # - local file_path name for dataset shard
     # - # of total rows in the shard
     # Load the ith parquet into runtime
-    def download_parquet(self, is_train: bool, index = 0):
+    def download_parquet(self, is_train: bool, index = 0, loaded_parquet_file_path = None):
 
         # curriculum_level is 0 indexed
         # my parquets are 1 indexed (sorry)
+
+        # If rank 0 downloaded, try passing in the parquet and returning immediately
+        if (loaded_parquet_file_path is not None and os.path.exists(loaded_parquet_file_path)):
+            return parquet_file_path, num_rows, curriculum_level
 
         # Finding Correct curriculum
         curriculum_level = 0
@@ -331,7 +333,7 @@ class MLMDataStrategy:
         ):
 
         # Get HF Dataset obj from parquet
-        dataset = datasets.from_parquet(path_or_paths = parquet_file_path, keep_in_memory = True)
+        dataset = Dataset.from_parquet(path_or_paths = parquet_file_path, keep_in_memory = True)
         
         # Shuffle after you shard
         # Make sure you set a seed to ensure the I don't use the same data again
@@ -516,7 +518,6 @@ class CheckpointDriver:
             if ckpt_vals["file"] == "" or not ckpt_vals["file"] in repo_files:
                 ckpt_vals["status"] = "deleted"
                 ckpt_vals["file"] = ""
-
 
 
         # Return training_state
@@ -992,6 +993,24 @@ class TelemetryDriver:
 # Function that all devices will run (ran from the launch function right above)
 def train_worker(rank, hw_config, data_config, ckpt_config):
 
+    # # Ignore termination signals in the child workers to prevent noisy tracebacks
+    # import signal
+    # signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+    # Smart Barrier (Rendezvous) to prevent data races & ensure all devices make it to certain step
+    def _smart_barrier(self, name="barrier"):
+        if hw_config.world_size <= 1:
+            return  # No synchronization needed for single device
+
+        if hw_config.device_type == "tpu":
+            import torch_xla.core.xla_model as xm
+            xm.rendezvous(name)
+        elif hw_config.device_type == "cuda":
+            import torch.distributed as dist
+            if dist.is_initialized():
+                dist.barrier()
+
     # Lazy Load
     import sys
     import traceback
@@ -1166,9 +1185,20 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             collator = SpanMLMCollator.SpanMLMCollator(
                 config = data_config, tokenizer = tokenizer
             )
+            
+            validation_file_path = ""
+            if rank == 0:
+                # Load Validation parquet for current curriculum level
+                validation_file_path, val_parquet_num_rows, parquet_curr_level = data_strat.download_parquet(is_train = False, index = parquet_index)
 
-            # Load Validation parquet for current curriculum level
-            validation_file_path, val_parquet_num_rows, parquet_curr_level = data_strat.download_parquet(is_train = False, index = parquet_index)
+            if hw_config.world_size > 1:
+                _smart_barrier("start_download_validation")
+
+            if rank !=0:
+                # Load Validation parquet for current curriculum level
+                validation_file_path, val_parquet_num_rows, parquet_curr_level = data_strat.download_parquet(is_train = False, index = parquet_index, loaded_parquet_file_path = validation_file_path)
+
+
 
             # Define validation_dataloader
             validation_loader = data_strat.get_mlm_data_loader(
@@ -1198,7 +1228,16 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
                 # Load Validation parquet for current curriculum level unless it's been preloaded
                 if new_train_file_path == "":
-                    train_file_path, train_parquet_num_rows, parquet_curr_level = data_strat.download_parquet(is_train = True, index = parquet_index)
+                    train_file_path = ""
+                    if rank == 0:
+                        train_file_path, train_parquet_num_rows, parquet_curr_level = data_strat.download_parquet(is_train = True, index = parquet_index)
+                    
+                    if hw_config.world_size > 1:
+                        _smart_barrier("start_download_training")
+
+                    if rank !=0:
+                        train_file_path, train_parquet_num_rows, parquet_curr_level = data_strat.download_parquet(is_train = True, index = parquet_index, loaded_parquet_file_path = train_file_path)
+
                 else:
                     train_file_path = new_train_file_path
                     train_parquet_num_rows = new_train_parquet_num_rows
@@ -1220,7 +1259,6 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                     parquet_index = parquet_index, 
                     is_train = True,
                     # prev_world_size = prev_world_size
-
                 )
                 
                 # if TPU is being used, apply the ParallelLoader().per_device_loader()
@@ -1245,11 +1283,12 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                             ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
                             total_loss = (ce_loss + aux_loss + sparsity_loss) / hw_config.grad_accum_steps
                     else:
-                        logits, aux_loss, sparsity_loss = model(input_ids=input_ids, attention_mask=attention_mask, current_step=global_step)
-                        # logits: [mb, seq_len, vocab_size] -> [mb*seq_len, vocab_size]
-                        # labels: [mb, seq_len] -> [mb*seq_len]
-                        ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
-                        total_loss = (ce_loss + aux_loss + sparsity_loss) / hw_config.grad_accum_steps
+                        with torch.autocast(device_type="xla", dtype=torch.bfloat16):
+                            logits, aux_loss, sparsity_loss = model(input_ids=input_ids, attention_mask=attention_mask, current_step=global_step)
+                            # logits: [mb, seq_len, vocab_size] -> [mb*seq_len, vocab_size]
+                            # labels: [mb, seq_len] -> [mb*seq_len]
+                            ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
+                            total_loss = (ce_loss + aux_loss + sparsity_loss) / hw_config.grad_accum_steps
 
                     if scaler is not None:
                         scaler.scale(total_loss).backward()
@@ -1258,6 +1297,19 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
                     # Once Gradient has been accumulated, step the model and the optimizer
                     if (step + 1) % hw_config.grad_accum_steps == 0:
+
+                        # Apply Gradient Clipping Here instead of inside the model
+                        # Start by unwrapping model form DDP or not
+                        unwrapped_model = model.module if hasattr(model, "module") else model
+
+                        # Now apply gradient clipping here to multi-view router's learnable params
+                        if hw_config.device_type == "tpu" or hw_config.device_type == "cuda":
+                            for block in unwrapped_model.model.blocks:
+                                torch.nn.utils.clip_grad_value_(
+                                    block.mlt_vw_rtr.parameters(),
+                                    clip_value = helm_config.router_grad_clip
+                                )
+
                         if is_tpu:
                             xm.optimizer_step(optimizer)
                             xm.mark_step()
@@ -1268,11 +1320,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                             optimizer.step()
 
                         # Normalize the model's weights
-                        unwrapped_model = model.module if hasattr(model, "module") else model
                         unwrapped_model.normalize_ngpt_matrices()
-
-                        # Save telemetry_dict
-                        telemetry_dict = unwrapped_model.get_telemetry()
 
                         # Zero the gradient
                         optimizer.zero_grad()
@@ -1282,6 +1330,10 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
                         # Log Data to Wandb
                         if global_step < 100 or global_step % 10 == 0:
+                                
+                            # Save telemetry_dict
+                            telemetry_dict = unwrapped_model.get_telemetry()
+
                             telemetry_driver.log_step(
                                 telemetry_dict = telemetry_dict, 
                                 ce_loss = to_float(ce_loss), 
@@ -1527,10 +1579,9 @@ def sidecar_uploader_loop(hf_token, repo_id):
                 # Squash History to ensure that the repo doesn't hold onto the archives
                 api.super_squash_history(repo_id=repo_id)
 
-                # Remove the current checkpoint and UPLOAD_REQUEST_XXXXXX.json, and uploading_training_state.json
+                # Remove the current checkpoint and UPLOAD_REQUEST_XXXXXX.json
                 os.remove(model_filename)
                 os.remove(upload_request_filename)
-                os.remove("uploading_training_state.json")
 
                 print(f"✅ Successfully uploaded {model_filename} @ step {step} to {repo_id}")
 
@@ -1597,8 +1648,11 @@ if __name__ == "__main__":
         print("⚠️ wandb_key was NULL. Make sure you allow secrets on Colab or Kaggle. Continuing Anonymous Logging")
         
 
+    # Use the 'spawn' context to prevent C++ state corruption
+    ctx = multiprocessing.get_context('spawn')
+    
     # Loading Sidecar via isolated CPU thread to upload
-    uploader_process = multiprocessing.Process(
+    uploader_process = ctx.Process(
         target = sidecar_uploader_loop,
         args = (CKPT_CFG.hf_token, CKPT_CFG.model_repo_id)
     )
