@@ -151,7 +151,7 @@ Created this log to help me document what is happening
     Fixed a bunch of tiny errors
     termindation during a checkpoint is to be s
     Moved the Gradient Clipping hook from model.py to the training loop to prevent TPU from not updating learnable params
-    Actually just learned that teh problem came from the autocasting making updates that are too big
+    Actually just learned that teh problem came from the autocasting making updates that are too small
     Therefore, we need to get rid of casting everything via the enviornmental vars and actually casting them to the right thing
     For now, we'll just cast everything to bf16 (maybe later we'll fix this)
 
@@ -169,8 +169,49 @@ Created this log to help me document what is happening
     Our code worked too good: We filled up our runtime with checkpoints before we were able to even upload all of them
     In reality, our sidecar died. 
 
-4/30 (1/2 Hour):
+5/2 (1 Hour):
+    Observing crash and proving that termination is not graceful
+    Observing behavior after warmup???
+
+5/3 (4 Hours):
+    Fixed download_parquet to now properly download the parquet once instead of world_size number of times
+    in resume_training - after downloading the checkpoint, delete it
+    Learned a ton about Threads, Events, processes, and signals (trying to connect things from class)
+
+    Added heartbeat logic for the train_worker function
+     - IPC technique: files on disk (heartbeat.txt)
+     - called once every 10 seconds to write something onto disk to ensure thread is alive
+     - Start independent thread in each process to write the time
     
+    Added checkpoint janitor function (ran by the main thread):
+     - After the sidecar finishes uploadeding during graceful exit, we run this
+     - Iterate thru all the remaing UPLOADER_REQUEST.json 's in the disk
+     - Try to upload if not in there already
+     - Timeout mechanism included
+    
+    In main:
+     - Create Threading event (essentially thread-safe bool)
+     - graceful shutdown function (1 click = graceful shutdown, 2 clicks = instant shutdown (sig sev))
+     - many vars are single-key dicts e.g: {"proc": 0}. The reason is that dicts are mutable container, to prevent race conditions (or rather this is the only way python allows you to do it)
+     - created watchdog for sidecar (it's own thread, and it calls the respawn function)
+     - created watchdog for the trainer (doesn't respawn, but signals to end)
+     - clean shutdown to ensure no processes are orphaned and kill all processes at the end (could take some time)
+    
+    To replace !python parallel_hardware_trainer.py:
+     - Create another script that calls that process instead
+     - Wrap it in a loop
+     - If user used graceful termination, a temp file gets written to tell the loop to stop
+    
+    CODE IS NOT TESTED
+
+5/16:
+    Code clean-up:
+    IPC (Inter-Process Communication)
+    Current issue: current logic only terminates the parent process, not the xmp spawn'ed child processes. So when parent dies, they become orphans
+    To solve this, use IPC technique of files (like the heartbeat) to send to child processes the graceful shutdown signal
+    
+
+
 
 
 
@@ -186,6 +227,9 @@ Goals:
     Create respawn mechanism for the sidecar
     create async process to load the parquets without pausing the entire script
     fix graceful termination
+    make the validation loader not try to download it again? Shouldn't be hard.
+    Delete the very first checkpoint that gets downloaded. Not necessary but still good to do.
+    New pausing error
     Fix Router Implementation and Behavior 
     TRAIN DIS SHIIIIII RAWWWHHHHHHHH 😈😈😈😈😈
 

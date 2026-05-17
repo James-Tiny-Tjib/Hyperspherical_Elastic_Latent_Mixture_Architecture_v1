@@ -53,6 +53,11 @@ os.environ["USE_TORCH"] = "1"
 os.environ["USE_TF"] = "0"
 os.environ["USE_JAX"] = "0"
 
+# Gets modified to tell child processes to return cleanly
+SHUTDOWN_FILE = "/tmp/SHUTDOWN_REQUESTED"
+# This lets the restarting launching script whether user intentionally ended program or not
+USER_STOP_MARKER = "/tmp/USER_STOPPED_TRAINING"
+
 # Force Path Refresh
 if 'site' in sys.modules:
     importlib.reload(site)
@@ -256,14 +261,15 @@ class MLMDataStrategy:
     # - local file_path name for dataset shard
     # - # of total rows in the shard
     # Load the ith parquet into runtime
-    def download_parquet(self, is_train: bool, index = 0, loaded_parquet_file_path = None):
+    def download_parquet(self, is_train: bool, index = 0): # , loaded_parquet_file_path = None):
 
         # curriculum_level is 0 indexed
         # my parquets are 1 indexed (sorry)
-
-        # If rank 0 downloaded, try passing in the parquet and returning immediately
-        if (loaded_parquet_file_path is not None and os.path.exists(loaded_parquet_file_path)):
-            return parquet_file_path, num_rows, curriculum_level
+        
+        # Broken logic let's move it further down
+        # # If rank 0 downloaded, try passing in the parquet and returning immediately
+        # if (loaded_parquet_file_path is not None and os.path.exists(loaded_parquet_file_path)):
+        #     return parquet_file_path, num_rows, curriculum_level
 
         # Finding Correct curriculum
         curriculum_level = 0
@@ -283,6 +289,16 @@ class MLMDataStrategy:
 
         local_storage_dir = "./local_parquet_shards"
         os.makedirs(local_storage_dir, exist_ok=True)
+        
+        # Form file path that potientially is already in file_path
+        local_path = os.path.join(local_storage_dir, parquet_file_path)
+        if os.path.exists(local_path):
+            try:
+                parquet_metadata = pq.read_metadata(parquet_file_path)
+                num_rows = parquet_metadata.num_rows
+                return local_path, num_rows, curriculum_level
+            except Exception as e:
+                print(f"Error when trying to access {local_path}: {e}. Redownloading instead")
 
         # Download
         try:
@@ -729,6 +745,17 @@ class CheckpointDriver:
             # Update the training_state session num
             self.training_state["session"] +=1
 
+            # Sync up
+            if self.world_size > 1:
+                self._smart_barrier("model_optimizer_loaded")
+            
+            # Let rank = 0 delete the last checkpoint to resume
+            if self.rank == 0:
+                try:
+                    os.remove(pt_path)
+                except Exception as e:
+                    printf("Loaded the model, but couldn't deleted intial checkpoint")
+
             # Just return the ckpt_entry; Extract the values later
             return ckpt_entry, actual_resume_step, self.training_state["session"]
 
@@ -989,14 +1016,39 @@ class TelemetryDriver:
         
 
 
-
 # Function that all devices will run (ran from the launch function right above)
 def train_worker(rank, hw_config, data_config, ckpt_config):
 
-    # # Ignore termination signals in the child workers to prevent noisy tracebacks
-    # import signal
-    # signal.signal(signal.SIGINT, signal.SIG_IGN)
-    # signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    # Because of exiting logic, child workers using train_worker must ignore SIGTERM/SIGINT 
+    # We need to be like: Okay sweetie, you need to end, but like do it when you get to a safe spot
+    import signal
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+    # We need each TPU process to communicate to the main process
+    # The best and cheapest way is to create a thread that write a file onto disk
+    # This sits outside the training loop so we can detect whether the training loop is hanging
+    import threading
+
+    # Start Daemon Thread to write 
+    heartbeat_stop = threading.Event()
+
+    # Fucntion to write the time
+    # If the entire train_worker process dies, this thread dies and fails to write
+    # This is how we will detect changes
+    def heartbeat_report():
+        path = f"/tmp/heartbeat_rank_{rank}.txt"
+        # True if even got set, false if timeout expired
+        while not heartbeat_stop.wait(timeout = 10):
+            try:
+                with open(path, "w") as f:
+                    f.write(str(time.time()))
+            except Exception:
+                pass # Ensure training doesn't crash because of this john
+    
+    # Start the thread
+    heartbeat_thread = threading.Thread(target=heartbeat_report, daemon = True)
+    heartbeat_thread.start()
 
     # Smart Barrier (Rendezvous) to prevent data races & ensure all devices make it to certain step
     def _smart_barrier(self, name="barrier"):
@@ -1158,6 +1210,8 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
         # ========== CURRICULUM LOOP ==========
         # Curriculum Outer Loop (starting from the current curriculum):
+        # This will be for when we need to break out of 3 loops & each loop at can this var
+        _shutdown_requested = False 
         for level in range(start_curr_level,len(data_config.curriculum_subset_names)):
 
             # Set Model to Training Mode
@@ -1196,7 +1250,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
             if rank !=0:
                 # Load Validation parquet for current curriculum level
-                validation_file_path, val_parquet_num_rows, parquet_curr_level = data_strat.download_parquet(is_train = False, index = parquet_index, loaded_parquet_file_path = validation_file_path)
+                validation_file_path, val_parquet_num_rows, parquet_curr_level = data_strat.download_parquet(is_train = False, index = parquet_index) # , loaded_parquet_file_path = validation_file_path)
 
 
 
@@ -1236,7 +1290,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                         _smart_barrier("start_download_training")
 
                     if rank !=0:
-                        train_file_path, train_parquet_num_rows, parquet_curr_level = data_strat.download_parquet(is_train = True, index = parquet_index, loaded_parquet_file_path = train_file_path)
+                        train_file_path, train_parquet_num_rows, parquet_curr_level = data_strat.download_parquet(is_train = True, index = parquet_index) # , loaded_parquet_file_path = train_file_path)
 
                 else:
                     train_file_path = new_train_file_path
@@ -1268,6 +1322,15 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                 # ========== TRAINING LOOP ==========
                 # Loop through each batch
                 for step, batch in enumerate(train_loader):
+
+                    # If SHUTDOWN_FILE exists, set the break boolean and break
+                    # Claude recommends to call the checkpoint driver, but then we might train on the same information
+                    # Therefore, we will just set the flag and dip
+                    if os.path.exists(SHUTDOWN_FILE):
+                        if rank == 0:
+                            print("SHUTDOWN_FILE is up. Ending...")
+                            _shutdown_requested = True
+                            break
 
                     # Get Batch's input ids, labels, and attn_mask (we don't have one but just in case) and attach it to device
                     input_ids = batch["input_ids"].to(device)
@@ -1478,7 +1541,11 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                                     print(f"Total Loss: {avg_val_loss:.4f} | CE: {avg_ce_loss:.4f} | Aux: {avg_aux_loss:.4f} | Sparsity: {avg_sparsity_loss:.4f}")
                             
                             # Call model.train
-                            model.train()   
+                            model.train()
+                
+                # break out of parquet loop
+                if _shutdown_requested:
+                    break
                     
                 if rank == 0:
                     print(f"📦 Finished parquet {parquet_index} (level {level}). Advancing.")
@@ -1493,14 +1560,47 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             # Delete valdiation parquet once the curriculum is over
             data_strat.delete_parquet(validation_file_path)
 
+            # break out of curriculum loop
+            if _shutdown_requested:
+                break
+
         # Destroy once all of these johns are done
         if hw_config.device_type == "cuda" and hw_config.world_size > 1:
             dist.destroy_process_group()
 
+        # if _shutdown requested and we use TPU, we need to manually mark the step to flush XLA
+        if _shutdown_requested and is_tpu:
+            import torch_xla.core.xla_model as xm
+            xm.mark_step()
+
+        # Stop the heartbeat and delete (so when rerun / revive occurs, it doesn't use the old file)
+        heartbeat_stop.set()
+        try:
+            os.remove(f"/tmp/heartbeat_rank_{rank}.txt")
+        except Exception:
+            pass
+
     except Exception as e:
         print(f"\n❌ FATAL WORKER ERROR ON RANK {rank}:")
         traceback.print_exc()
+
+        # Write to SHUTDOWN_FILE
+        try:
+            with open (SHUTDOWN_FILE) as f:
+                f.write(f"crash_rank{rank}")
+        except Exception:
+            pass
+        
+        # remove the rank's heartbeat (to ensure expire logic works)
+        heartbeat_stop.set()
+        try:
+            os.remove(f"/tmp/heartbeat_rank_{rank}.txt")
+        except Exception:
+            pass
+        
         return
+
+
 
 
 
@@ -1592,22 +1692,140 @@ def sidecar_uploader_loop(hf_token, repo_id):
         # Pause 5 seconds before rechecking if UPLOAD_REQUEST.json exists
         time.sleep(5)
 
+# Call this in the main thread / process before kicking the sidecar
+def checkpoint_janitor(hf_token, repo_id, max_total_seconds=300):
+
+    # Get HF API
+    from huggingface_hub import HfApi
+    api = HfApi(token=hf_token)
+    deadline = time.time() + max_total_seconds
+    
+    # Get sorted list of all checkpoints
+    pending = sorted(
+        f for f in os.listdir(".")
+        if f.startswith("UPLOAD_REQUEST_") and f.endswith(".json")
+    )
+
+    # Get all the existing files from HF repo
+    existing_files = set(api.list_repo_files(repo_id))
+
+    # return if nothing
+    if not pending:
+        return
+    
+    # Upload remaining checkpoints
+    print(f"💾 Salvaging {len(pending)} pending checkpoint(s)...")
+    salvaged = 0
+    for req_file in pending:
+
+        # Break if deadline reached
+        if time.time() > deadline:
+            print(f"⚠️ Salvage budget exhausted. {len(pending) - salvaged} unsaved.")
+            break
+
+        # Try to upload
+        try:
+
+            # Take info from json
+            with open(req_file) as f:
+                req = json.load(f)
+            model_file = req["file_to_upload"]
+            step = req["step"]
+
+            # If its alredy in the Repo, delete it from here
+            if model_file in existing_files:
+                print(f"{model_file} alsread on Hub. Delete from rumtime dir.")
+                os.remove(model_file)
+                os.remove(req_file)
+                salvaged += 1
+                continue
+
+            
+            # Skip if model file is missing (already deleted or never written)
+            if not os.path.exists(model_file):
+                print(f"⚠️ {req_file} references missing {model_file}; skipping.")
+                continue
+            
+            # Uploading...
+            print(f"⏳ Salvaging {model_file} (step {step})...")
+            api.upload_file(
+                path_or_fileobj=model_file,
+                path_in_repo=model_file,
+                repo_id=repo_id,
+                repo_type="model",
+            )
+
+            # Update the training_state.json
+            snapshot = req["training_state_snapshot"]
+            api.upload_file(
+                path_or_fileobj=json.dumps(snapshot, indent=4).encode("utf-8"),
+                path_in_repo="training_state.json",
+                repo_id=repo_id,
+                repo_type="model",
+            )
+            os.remove(model_file)
+            os.remove(req_file)
+            salvaged += 1
+            print(f"✅ Salvaged step {step}.")
+        except Exception as e:
+            print(f"❌ Failed to salvage {req_file}: {e}")
+    
+    print(f"💾 Salvage complete: {salvaged}/{len(pending)} uploaded.")
+
 
 if __name__ == "__main__":
 
     # Allow to kill all processes / end them correctly --------
     import signal
     import sys
+    import threading
+    import shutil
 
+    # Shutdown Event (Essentially Thread-safe boolean)
+    shutdown_event = threading.Event()
+    shutdown_count = {"n": 0}
+
+    # Shutdown manager
+    # This is called once automatically. Press again if the shutdown is
+    # completely cooked, skipping all cleanup.
     def graceful_shutdown(signum, frame):
-        print(f"\n⚠️ Caught termination signal ({signum}). Forcing graceful shutdown...")
-        # Raising SystemExit forces Python to execute your 'finally' block!
-        sys.exit(0)
+        shutdown_count["n"] +=1
+        if shutdown_count["n"] >=2:
+            # Hard termination (x2 hits)
+            print(f"2nd signal {signum} received. Hard Exit")
+            try:
+                with open(USER_STOP_MARKER, "w") as f:
+                    f.write("hard")
+            except Exception:
+                pass
+            os._exit(1)
+        else:
+            # Graceful termination
+            print(f"Termination Signal ({signum}). Sending shutdown file to workers... (Ctrl+C again to hard-exit)")
+            try:
+                with open(SHUTDOWN_FILE, "w") as f:
+                    f.write("user")
+                with open(USER_STOP_MARKER, "w") as f:
+                    f.write("graceful")
+            except Exception:
+                pass
+
+            # Mark the sutdown event to gracefully shutdown
+            shutdown_event.set()
+
 
     # Catch Kaggle's Stop button (SIGTERM) and Keyboard Interrupts (SIGINT)
     signal.signal(signal.SIGTERM, graceful_shutdown)
     signal.signal(signal.SIGINT, graceful_shutdown)
     # ---------------------------------------------------------
+
+    # Delete all existing SHUTDOWN_FILE and USER_STOP_MARKER that could've been from previous runs
+    for f in [SHUTDOWN_FILE, USER_STOP_MARKER]:
+        if os.path.exists(f):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
 
     # Ensure environment is primed for TPU PJRT
     for key in ["XRT_TPU_CONFIG", "PJRT_SELECT_DEVICE", "TPU_PROCESS_ADDRESSES"]:
@@ -1650,48 +1868,298 @@ if __name__ == "__main__":
 
     # Use the 'spawn' context to prevent C++ state corruption
     ctx = multiprocessing.get_context('spawn')
-    
-    # Loading Sidecar via isolated CPU thread to upload
-    uploader_process = ctx.Process(
-        target = sidecar_uploader_loop,
-        args = (CKPT_CFG.hf_token, CKPT_CFG.model_repo_id)
-    )
-    uploader_process.start()
 
+    # Update: Sidecar respawn. Insteaf spawning one time, create respawning thread
+
+    # Create holder so watchdog can swap the sidecar
+    sidecar_holder = {"proc": None}
+
+    def spawn_sidecar():
+        # Loading Sidecar via isolated CPU thread to upload
+        uploader_process = ctx.Process(
+            target = sidecar_uploader_loop,
+            args = (CKPT_CFG.hf_token, CKPT_CFG.model_repo_id),
+            daemon = False
+        )
+        uploader_process.start()
+        return uploader_process
+    
+    sidecar_holder["proc"] = spawn_sidecar()
+
+    # Watchdog worker function to respawn sidecar
+    def sidecar_watchdog():
+        crash_count = 0
+        MAX_CRASHES = 5
+        # Checks every 30 seconds
+        while not shutdown_event.wait(timeout = 30):
+            proc = sidecar_holder["proc"]
+            # is_alive() is really waitpid(pid, WNOHANG)
+            # True when running
+            # False when zombie
+            if not proc.is_alive():
+                # Reap the zombie
+                proc.join(timeout = 5)
+                if (crash_count >= MAX_CRASHES):
+                    print(f"Sidecar crashed {crash_count} times. No reboot card for you anymore...")
+                    return
+                crash_count +=1
+                exitcode = proc.exitcode
+                print(f"⚠️ Sidecar died (exitcode={exitcode}, crash #{crash_count}). Respawning...")
+                sidecar_holder["proc"] = spawn_sidecar()
+    
+    # Create Watchdog
+    sidecar_watchdog_thread = threading.Thread(target=sidecar_watchdog, daemon = True)
+    sidecar_watchdog_thread.start()
+
+    # Watchdog worker function to respawn training
+    def training_watchdog():
+
+        STALE_WARN       = 120   # 2 min:  warn, keep running
+        STALE_KILL       = 600   # 10 min: write SHUTDOWN_FILE
+        ESCALATION_WAIT  = 120   # 2 min after writing file: hard-kill workers
+
+        warned = set()
+        watchdog_triggered = False  # True once we've written SHUTDOWN_FILE
+        kill_time = None
+
+        while True:
+
+            # If an external shutdown happened (user pressed stop) and we
+            # didn't trigger it ourselves, step aside — the signal handler
+            # already wrote the file and the workers will handle it.
+            if shutdown_event.is_set() and not watchdog_triggered:
+                return
+
+            now = time.time()
+
+            # ── ESCALATION PHASE ─────────────────────────────────────────
+            # We already wrote SHUTDOWN_FILE. Workers that are running normally
+            # will have seen it and exited (their heartbeat files deleted).
+            # Workers that are hung in an XLA op or barrier can't read files
+            # from Python — we need to kill their processes directly.
+            if watchdog_triggered:
+                elapsed = now - kill_time
+
+                # A deleted heartbeat file = that worker exited cleanly.
+                # A stale heartbeat file  = that worker is still hung.
+                any_still_hung = False
+                for r in range(HW_CFG.world_size):
+                    path = f"/tmp/heartbeat_rank_{r}.txt"
+                    if not os.path.exists(path):
+                        continue  # Gone — exited cleanly
+                    try:
+                        with open(path) as f:
+                            last = float(f.read().strip())
+                        if (now - last) > STALE_KILL:
+                            any_still_hung = True
+                            break
+                    except Exception:
+                        continue
+
+                if not any_still_hung:
+                    print("✅ WATCHDOG: All workers responded to shutdown request. Done.")
+                    return
+
+                if elapsed > ESCALATION_WAIT:
+                    print(f"💀 WATCHDOG: Workers still hung {elapsed:.0f}s after shutdown request.")
+                    print("   Killing worker processes directly so the TPU can be released.")
+                    # Kill worker processes directly. xmp.spawn will detect their
+                    # deaths and raise an exception, which lets the parent's
+                    # finally block run — cleaning up the TPU lockfile properly.
+                    # This is why we don't use os._exit() here: we NEED the
+                    # finally block to run to remove /tmp/libtpu_lockfile.
+                    for proc in multiprocessing.active_children():
+                        if proc is sidecar_holder["proc"]:
+                            continue
+                        print(f"   SIGKILL → PID {proc.pid}")
+                        try:
+                            proc.kill()
+                        except Exception:
+                            pass
+                    return
+
+                # Still in grace period — log every ~30s
+                if int(elapsed) % 30 < 11:
+                    print(f"⏳ WATCHDOG: Waiting for workers ({elapsed:.0f}s / {ESCALATION_WAIT}s)...")
+                time.sleep(10)
+                continue
+
+            # ── NORMAL MONITORING PHASE ───────────────────────────────────
+            # Sleep first, then check. Sleeping first gives workers time to
+            # write their first heartbeat before we start looking.
+            time.sleep(30)
+            now = time.time()
+
+            for r in range(HW_CFG.world_size):
+                path = f"/tmp/heartbeat_rank_{r}.txt"
+                if not os.path.exists(path):
+                    continue  # Not started yet, or already exited cleanly
+
+                try:
+                    with open(path) as f:
+                        last = float(f.read().strip())
+                except Exception:
+                    continue
+
+                age = now - last
+
+                if STALE_KILL is not None and age > STALE_KILL:
+                    print(f"💀 WATCHDOG: Rank {r} heartbeat {age:.0f}s old (>{STALE_KILL}s). Requesting shutdown.")
+                    try:
+                        with open(SHUTDOWN_FILE, "w") as f:
+                            f.write("watchdog")
+                    except Exception:
+                        pass
+                    shutdown_event.set()
+                    watchdog_triggered = True
+                    kill_time = now
+                    break  # Break the inner for-loop; next while iteration → escalation phase
+
+                if age > STALE_WARN and r not in warned:
+                    print(f"⚠️ WATCHDOG: Rank {r} heartbeat {age:.0f}s old (>{STALE_WARN}s). Possible hang.")
+                    warned.add(r)
+                elif age <= STALE_WARN and r in warned:
+                    print(f"✅ WATCHDOG: Rank {r} heartbeat recovered.")
+                    warned.discard(r)
+    
+    # Start trainer watchdog for all threads
+    training_watchdog_thread = threading.Thread(target=training_watchdog, daemon=True)
+    training_watchdog_thread.start()
+ 
+        
     # Prepare Hardware Driver
     driver = HardwareDriver(HW_CFG, DATA_CFG, CKPT_CFG)
 
     # Try to launch training process
     try:
         driver.launch(train_worker)
+    except KeyboardInterrupt:
+        print("⚠️ Training interrupted by signal or pause button")
     except Exception as e:
         print(f"💀 Summ done messed up cuh {e}")
+        import traceback
+        traceback.print_exc()
 
     finally:
+        
+        # print("🔪 Initiating Termination Sequence...")
+        # # Set shutdown event
+        # shutdown_event.set()
 
-        print("🔪 Initiating Termination Sequence...")
+        # # Try to kill all processes gracefully then forcefully
+        # try:
+        #     # Collect orphans not sidecar
+        #     orphans = []
+        #     for process in multiprocessing.active_children():
+        #         if process is not sidecar_holder["proc"]:
+        #             orphans.append(process)
+            
+        #     # Initially try to terminate all orphans
+        #     if orphans:
+        #         print("Trying to reap all orphans")
+        #         for o in orphans:
+        #             try:
+        #                 o.terminate()
+        #             except Exception:
+        #                 pass
+            
+        #     # And join / for normal exit
+        #     deadline = time.time() + 20
+        #     for o in orphans:
+        #         remaining = max (0, deadline - time.time())
+        #         o.join(timeout = remaining)
+            
+        #     # If they make it out here, kill them now
+        #     for o in orphans:
+        #         if o.is_alive():
+        #             print(f"SIGKILL PID: {o.pid}")
+        #             try:
+        #                 o.kill()
+        #             except Exception: 
+        #                 pass
+        #             o.join(timeout=5)
+        # except Exception as e:
+        #     print(f"⚠️ Error reaping orphans: {e}")
 
-        # Ensure Sidecar finishes before termiantion
+        # 1. Reap all children (join them)
+        for proc in multiprocessing.active_children():
+            if proc is sidecar_holder["proc"]:
+                continue 
+            proc.join(timeout = 15)
+            if proc.is_alive():
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                proc.join(timeout = 5)
+
+
+
+
+        # 2. Ensure Sidecar finishes uploading if its currently uploading
         time_count = 0
-        while True:
-            still_uploading = False
-            for file in os.listdir("."):
-                if file.startswith("UPLOAD_REQUEST_") and file.endswith(".json"):
-
-                    if time_count % 60 == 0:
-                        print(f"⏳ Sidecar is currently processing a final upload. Waiting for it to finish...")
-                        print(f"Elapsed Time: {time_count//60} minute(s)")
-
-                    still_uploading = True
-                    break
-
+        MAX_DRAIN_SEC = 600
+        while time_count < MAX_DRAIN_SEC:
+            still_uploading = any(
+                file.startswith("UPLOAD_REQUEST_") and file.endswith(".json")
+                for file in os.listdir(".")
+            )
             if not still_uploading:
                 break
-
+            if not sidecar_holder["proc"].is_alive():
+                print("Mr Sidecar is DED! Failed to upload rest of the files")
+            if time_count % 60 == 0:
+                print(f"⏳ Sidecar is currently processing a final upload. Elapsed Time: {time_count//60} minute(s)")
             time.sleep(5)
             time_count +=5
+        if time_count >= MAX_DRAIN_SEC:
+            print(f"Sidecar failed to upload after {MAX_DRAIN_SEC}. Fore exit")
 
-        # Terminate Sidecars
-        uploader_process.kill()
-        uploader_process.join()
-        print("Shutdown complete.")
+        # Call the checkpoint janitor
+        try:
+            checkpoint_janitor(hf_token = HW_CFG.hf_token, repo_id = CKPT_CFG.model_repo_id, max_total_seconds=300)
+        except Exception as e:
+            print(f"🧹⚠️ Janitor failed {e}")
+        
+        # Kill the sidecar
+        try:
+            sidecar_holder["proc"].terminate()   # SIGTERM first
+            sidecar_holder["proc"].join(timeout=15)
+            if sidecar_holder["proc"].is_alive():
+                sidecar_holder["proc"].kill()    # SIGKILL only if needed
+                sidecar_holder["proc"].join(timeout=5)
+        except Exception as e:
+            print(f"⚠️ Sidecar couldn't be killed {e}")
+
+        # Im not even trying to explain this one:
+        # 4. Clean up TPU artifacts that block subsequent runs.
+        #    libtpu uses a lockfile; if any child died holding it, it's stale and
+        #    libtpu won't let the next run acquire the device until the kernel
+        #    restarts. Removing it here is what restores "stop and re-run" behavior.
+        if HW_CFG.device_type == "tpu":
+            for lockfile in ["/tmp/libtpu_lockfile"]:
+                if os.path.exists(lockfile):
+                    try:
+                        os.remove(lockfile)
+                        print(f"🧹 Removed stale {lockfile}")
+                    except Exception as e:
+                        print(f"⚠️ Could not remove {lockfile}: {e}")
+
+        # Remove heartbeat files
+        for i in range(HW_CFG.world_size):
+            path = f"/tmp/heartbeat_rank_{i}.txt"
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+
+        # Clean up the shutdown signal file itself
+        for f in [SHUTDOWN_FILE, USER_STOP_MARKER]:
+            if f == SHUTDOWN_FILE and os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+                   
+        print("💅 Okay girl... shutdown is  ✨✨COMPLETE✨✨")
