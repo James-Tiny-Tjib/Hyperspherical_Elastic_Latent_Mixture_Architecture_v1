@@ -20,6 +20,21 @@ import torch.nn as nn
 from transformers import AutoTokenizer
 from transformers import PretrainedConfig, PreTrainedModel
 
+# try:
+#     from torch_xla.experimental.custom_kernel import flash_attention as xla_flash_attention
+#     HAS_XLA_FLASH = True
+# except ImportError:
+#     HAS_XLA_FLASH = False
+
+# _dtype_log_done = False
+
+# def dprobe(tag, *tensors_with_names):
+#     """Print dtypes once per training run. Use sparingly inside hot paths."""
+#     global _dtype_log_done
+#     if _dtype_log_done:
+#         return
+#     parts = [f"{name}={t.dtype}" for name, t in tensors_with_names]
+#     print(f"[{tag}] " + " ".join(parts))
 
 
 # modified justnorm() function
@@ -213,6 +228,7 @@ class HELMMultiViewRouter(nn.Module):
     # Don't pass in attention mask bc theres no attention here (duh)
     def forward(self, hidden_states, step_tensor):
 
+
         # Write vars for cleaner code
         q_down_proj = self.q_down_proj
         l_i_weights = self.l_i_weights
@@ -222,6 +238,8 @@ class HELMMultiViewRouter(nn.Module):
         num_elastic_heads = self.num_elastic_heads
         self.selection_threshold = self.config.selection_threshold
 
+
+        
         # Norm Query Matrix
         # Requires .weight since the matrix was defined before
         q_down_proj = justnorm(q_down_proj.weight, dim = 1).to(hidden_states.dtype)
@@ -277,6 +295,27 @@ class HELMMultiViewRouter(nn.Module):
         # Sigmoid Scores
         # Size: still [b, 1, num_permanent_heads - num_elastic_heads], but with sigmoid scores
         sigmoid_scores = torch.sigmoid(class_scores)
+
+        # EDIT 2: This is not the culprit to why tau, suv_hist, and l_i_weights aren't being updated
+        # By directly down-casting to BF16, all updates are too small to be registered adn therefore will not cause the weights to move
+        # SOLUTION: Delete the BF16 env vars
+        # EDIT: DON'T APPLY Gradient Clipping HERE
+        # Reason: TPU graphs can't compile arbitrary Python callbacks, and it doesn't apply gradients to the things tied 
+        # to the router, hence the lack of updates of a bunch of things.
+        # Instead, we should apply gradient clipping in the training loop instead
+        # # Apply Router Gradient Clip (to prevent violent gradient updates if a specific head was wrong)
+        # if self.training and self.config.router_grad_clip > 0.0:
+            
+        #     def clip_router_gradients(raw_gradient):
+        #         return torch.clamp(
+        #             raw_gradient,
+        #             min = -self.config.router_grad_clip,
+        #             max = self.config.router_grad_clip
+        #     )
+
+        #     sigmoid_scores.register_hook(clip_router_gradients)
+            
+
 
         # NEW SELECTION STRATEGY: #########################
         # To prevent recompiling during top-k to threshold, we will move onto a slightly more refined approach:
@@ -483,11 +522,19 @@ class HELMSelfAttention(nn.Module):
         )
     
     # Define Training
+    # def forward(self, hidden_states, attention_mask, seg_ids, router_mask):
     def forward(self, hidden_states, attention_mask, router_mask):
+
 
         # Obtain projection from hidden_states onto QKV
         # size(): [b, seq_len, hidden_size * 3]
         qkv_proj = cast_linear(hidden_states, self.qkv)
+
+        # if self.training and not hasattr(self, '_dtype_logged'):
+        #     print(f"[dtype] hidden_states={hidden_states.dtype} "
+        #         f"qkv_proj={qkv_proj.dtype} "
+        #         f"qkv.weight={self.qkv.weight.dtype}")
+        #     self._dtype_logged = True
 
         # Obtain Hidden Size
         batch_size, seq_len, hidden_size = hidden_states.size()
@@ -538,6 +585,25 @@ class HELMSelfAttention(nn.Module):
                 attn_mask=attention_mask.to(q.dtype),
                 scale=math.sqrt(self.d_head)
             )
+
+            # Implement Pallas or regular SDPA
+            # if HAS_XLA_FLASH and q.device.type == "xla":
+            #     # Pallas flash attention - never materializes the [B,H,S,S] score matrix
+            #     # NOTE: sm_scale is multiplied with QK^T (matches your existing nGPT scale)
+            #     context_layer = xla_flash_attention(
+            #         q, k, v,
+            #         causal=False,
+            #         q_segment_ids=seg_ids,
+            #         kv_segment_ids=seg_ids,
+            #         sm_scale=math.sqrt(self.d_head),   # nGPT scale, matches your old SDPA call
+            #     )
+            # else:
+            #     # Fallback: SDPA (used for use_exclusive_attention=True or non-XLA)
+            #     context_layer = F.scaled_dot_product_attention(
+            #         q, k, v,
+            #         attn_mask=attention_mask.to(q.dtype),
+            #         scale=math.sqrt(self.d_head),
+            #     )
 
             # Add Exclusive Attention (better results?)
             if (self.config.use_exclusive_attention):
@@ -787,6 +853,18 @@ class HELMMLP(nn.Module):
         hidden_states_opt2 = A_norm + lr * (B_norm - A_norm)
         hidden_states_opt2 = justnorm(hidden_states_opt2)
 
+        # dprobe("mlp_end",
+        #     ("input_h", hidden_states),
+        #     ("input_h_attn", hidden_states_attention),
+        #     ("A_norm_pre", A_norm),
+        #     ("uv_pre", uv_pre),       # bind uv to a name you don't reassign, see note below
+        #     ("uv_post_suv", uv_post_suv),   
+        #     ("h_mlp", h_mlp),
+        #     ("B_norm", B_norm),
+        #     ("lr", lr),
+        #     ("output", hidden_states_opt2),
+        # )
+
         # Return new hidden_state
         return hidden_states_opt2
 
@@ -850,6 +928,9 @@ class HELMModel(nn.Module):
     # Forward Pass
     def forward(self, input_ids, attention_mask, current_step = None):
 
+        # Save segment-id form for Pallas: [B, S] int32, 1=valid, 0=pad
+        # seg_ids = attention_mask.to(torch.int32)
+
         # Build additive mask for SDPA fallback
         # Reshape Additive Mask to be 4D for SDPA [batch_size, 1, 1, seq_len]
         attention_mask = attention_mask.unsqueeze(1).unsqueeze(2).to(torch.bfloat16)
@@ -889,6 +970,7 @@ class HELMModel(nn.Module):
                 )
             # Or Standard Forward Pass
             else:
+                # hidden_states, aux_loss, sparsity_loss = block(hidden_states, attention_mask, seg_ids, step_tensor)
                 hidden_states, aux_loss, sparsity_loss = block(hidden_states, attention_mask, step_tensor)
                 
             total_aux_loss += aux_loss
@@ -958,6 +1040,7 @@ class HELMForMaskedLM(PreTrainedModel):
             "mlp.mlp_exp.weight",
             "mlp.mlp_proj.weight",
             "mlt_vw_rtr.q_down_proj.weight"
+            # ,"mlt_vw_rtr.q_up_proj.weight" # Remove b/c messing up sigmoid scores
         )
 
         # Normalize every one of those mats along their dim = 1 (embedding)
@@ -965,6 +1048,7 @@ class HELMForMaskedLM(PreTrainedModel):
         with torch.no_grad():
             for name, param in self.named_parameters():
                 if name.endswith(keys_to_normalize):
+                    # param.data = justnorm(param.data, dim = 1, eps = 1e-12)
                     # EDIT: Instead of complete data-reassignment (danger-danger!!!), use in_place copying
                     param.copy_(justnorm(param, dim = 1, eps = 1e-12))
 
@@ -1054,6 +1138,9 @@ class HELMForMaskedLM(PreTrainedModel):
         telemetry["lm_head_sz_hist"] = sz_tensor
         
         return telemetry
+
+
+
 
 
 

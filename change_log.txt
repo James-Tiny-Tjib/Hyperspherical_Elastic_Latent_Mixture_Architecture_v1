@@ -204,12 +204,15 @@ Created this log to help me document what is happening
     
     CODE IS NOT TESTED
 
-5/16:
+5/16 (6 hours):
     Code clean-up:
     IPC (Inter-Process Communication)
     Current issue: current logic only terminates the parent process, not the xmp spawn'ed child processes. So when parent dies, they become orphans
     To solve this, use IPC technique of files (like the heartbeat) to send to child processes the graceful shutdown signal
-    
+    I reverted Pallas -> DPSA
+    Learned !python llm_hardware_univeral_trainer.py does not work, and a new luanching script is required
+    Sundays = Good Queue on Kaggle
+
 
 
 

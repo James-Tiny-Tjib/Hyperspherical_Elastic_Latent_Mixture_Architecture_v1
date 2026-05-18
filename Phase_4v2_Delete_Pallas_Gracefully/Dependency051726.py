@@ -4,7 +4,7 @@ import subprocess
 import glob
 
 # 🎛️ SET THIS TO TRUE FOR TPU, FALSE FOR GPU
-FORCE_TPU = False
+FORCE_TPU = True
 
 def repair_environment():
 
@@ -27,8 +27,8 @@ def repair_environment():
                 "torch==2.8.0",
                 "torchvision==0.23.0",
                 "torch_xla[tpu]==2.8.0",
-                # 🩹 THE FIX: Unpinned numpy, pyarrow, and fsspec to allow Numpy 2.0+ compatibility
                 "numpy", "pyarrow", "fsspec",
+                "protobuf>=5.28.0",
                 "datasets", "transformers", "huggingface_hub>=0.28.0", "wandb",
                 "cloud-tpu-client", "scikit-learn", "pandas<3.0.0",
                 "-f", "https://storage.googleapis.com/libtpu-releases/index.html",
