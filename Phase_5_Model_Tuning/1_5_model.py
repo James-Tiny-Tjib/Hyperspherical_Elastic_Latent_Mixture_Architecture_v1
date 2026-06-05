@@ -74,7 +74,7 @@ class HELMConfig(PretrainedConfig):
         router_aux_loss_coeff = 0.02,
         router_grad_clip = 0.05,    
         sparsity_warm_up_steps = 2000,
-        use_sigmoid_scaling = True,
+        use_sigmoid_scaling = False,
         ngpt_sqk_init_value = 1.0,  
         ngpt_sqk_init_scale = 0.03125,
         ngpt_alpha_value_attn = 0.05,
@@ -88,7 +88,7 @@ class HELMConfig(PretrainedConfig):
         bias = False,
         use_ckpt = False,
         lr = 15e-4,
-        use_exclusive_attention = False,
+        use_exclusive_attention = True,
         **kwargs 
     ):  
         self.hidden_size = hidden_size

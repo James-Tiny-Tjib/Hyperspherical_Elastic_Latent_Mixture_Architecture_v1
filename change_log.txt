@@ -204,7 +204,7 @@ Created this log to help me document what is happening
     
     CODE IS NOT TESTED
 
-5/16 (6 hours):
+5/17 (6 hours):
     Code clean-up:
     IPC (Inter-Process Communication)
     Current issue: current logic only terminates the parent process, not the xmp spawn'ed child processes. So when parent dies, they become orphans
@@ -212,7 +212,95 @@ Created this log to help me document what is happening
     I reverted Pallas -> DPSA
     Learned !python llm_hardware_univeral_trainer.py does not work, and a new luanching script is required
     Sundays = Good Queue on Kaggle
+    Everything == CREEMY!!!
 
+5/18: 
+    Starting to fix the router logic
+    Our current logic (pre 5/18):
+        Router:
+            Bilinear projection on hidden state:
+            Input: [b, s, hidden_size] (h_s)
+            Scanner (q_down_proj): [b, s, hidden_size] * [hidden_size * num_router_latents] = [b, s, num_router_latents] (sc)
+            Softmax (sc_s)
+            Transpose [b, s, num_router_latents] -> [b, num_router_latents, s] (sc_s_t)
+            Project sc_s_t back onto the hidden states: [b,num_router_latents,s] * [b, s, hidden_size] = [b, num_router_latents, hidden_size] (la)
+            # Commented out (la) normalizing
+            Softmax the l_i weights ??? (they all add up to 1 so they are all .25??? and the threshold is like .5?????)
+            Broadcast the l_i onto the latents & sum them:  ([b, num_router_latents, hidden_size] * broadcast [1, num_router_latents, 1]) ->[b, 1, hidden_size] (p_l)
+            # Commented out another normalization stage
+            Normalize to prep q_up_proj (q_u_p)
+            Project p_l onto (q_u_p) [b, 1, hidden_size] * [hidden_size, num_permanent_heads - num_elastic_heads] = [b, 1, num_permanent_heads - num_elastic_heads] (c_s)
+            c_s *= tau
+            Apply sigmoid activation
+            Selection Strategy:
+                Calculate topk and threshold
+                choose 1 based on warm up
+            if use_sigmoid_scaling: multiply the flat mask with the sigmoid scores
+            add back the permananent heads (wonder how they'd look, esepecially that they are 1 instead of the others)
+            Loss functions:
+                Auxilary Loss: to ensure even head is used (Load Balancer)
+                    Remember: The scores its looking at are multiplied by tau and passed into sigmoid
+                     - Note that the sum of the sigmoid scores can be more than 1 (invariant)
+                     - sigmoid essentially ranges between 0.5 - 1
+                    For every head, average their scores among the batch (P)
+                    Only take the heads that are above the threshold (f)
+                    Multiply f and P together for each head and sum the score
+                    Multiply by the number of elastic heads and router_aux_loss_coeff
+                    If we have 1 head turned on and all all turned off (e.g) .95: (.95*.95) = .9025
+                    If we have all x heads (lets say 10) turn on: (.1*.1) * 10 = .1 (This is better)
+                    Hmm let me think about this: So the range of the Sigmoid scores are (0 - 0.5) THEY ONLY GO DOWN AND ALL TO ZERO
+                    My guess is that because adding heads = more loss, they just turn them all off
+                    Maybe I need to make a new loss function so that:
+                        - When it uses 3 of the heads (3 + 2), maybe I should not even count the loss from there (like subtract the loss terms, and everything else remain the same)
+                        - perhaps even make the loss go even less (like actually insentivise them)
+                Sparsity Loss: to ensure the model doesn't pick all the heads at the same time
+                    Warm up ramps from 0 - 0.02 within 2000 steps
+                    essentially, calculate the mean frequency of each head throughout the batch, and sum the frequencies together
+                    I honestly don't think this is a problem.
+
+            
+            We could try to pivot to this mechanism:
+            Router:
+                remove the sigmoid scaling - set it to False
+                Rework the warm up:
+                    Instead of: topk -> threshold
+                    Do: no aux / sparsity loss -> slowly anneal them
+                    Pros:
+                        the heads actually learn shit
+                    Cons:
+                        They might need all the heads are important.
+            Loss:
+                Introduce difficulty based head use / predictions logic
+                We need to modify to fine-tune a model to predict the BT_easiness score of a text
+                We need to score the bigger text's difficulty
+                Clean it up, remove outliers. 
+                Now we have text + difficulty values
+                Now we need to merge texts with similar scores to make them 1024, 2048, 4096
+                    - maybe we take weighted scores
+                Clean (remove outliers) and normalize the scores so they are between 0 and 1
+                Scores should match the ratio of how many heads the model should use
+            Add back the W in AdamW
+            Make the weights scale with the total loss when updating .03125 may be pretty aggressive
+            
+5/30:
+    Created a Script to prepare all commonlit BT_easiness Data
+    Fine-tuned ModernBERT-base on the BT_easiness Data
+    Created Program to test 1024 Samples of a dataset and visualize the difficulty via the logits
+    Curating Datasets of mixed difficulty to reach 10 Billion Tokens
+    40% Fine web = 4 Billion Tokens
+    Goals:
+        40% Fine web (5 Billion tokens) (Scientific slightly harder stuff)
+        10% Super Easy Stuff (All of Tiny Stories and Simple Stories)
+        10% Hard stuff (all of arxiv-abstracts-large, pubmed_simple, and govreport)
+        10% TTCW-Based-Review (Harder Literature) (1 Billion Tokens) 
+        1% Simple Wiki (All of it)
+        25% Reddit
+
+5/31 - 6/5:
+    Completed the Following:
+        step_1 tokenizes all the datasets into 512 chunks, packs into parquets and makes Repo
+        step_2 takes all the repos and evenly distrubute all the data from the datasets and repacks them into parquets
+        step_3 uses TPU to perform inference between fine-tuned BT_scorer and data, scoring and merging 512 blocks to become 1024, 2048, 4096 (since bt_scorer had a context window of 512)
 
 
 
@@ -227,12 +315,7 @@ Created this log to help me document what is happening
 
 
 Goals:
-    Create respawn mechanism for the sidecar
     create async process to load the parquets without pausing the entire script
-    fix graceful termination
-    make the validation loader not try to download it again? Shouldn't be hard.
-    Delete the very first checkpoint that gets downloaded. Not necessary but still good to do.
-    New pausing error
     Fix Router Implementation and Behavior 
     TRAIN DIS SHIIIIII RAWWWHHHHHHHH 😈😈😈😈😈
 
