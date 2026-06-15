@@ -36,13 +36,16 @@ def cast_linear(x, layer):
     return F.linear(x,w,b)
 
 
-# Hugging Face Core Method (for future deployment)
+# Hugging Face Config Class (for future deployment)
 class HELMConfig(PretrainedConfig):
 
     model_type = "helm"
 
     def __init__(
+
         self,
+
+        # General Model Hyperparameters
         hidden_size = 1024,
         sqrt_hidden_size = 32,
         max_position_embeddings = 4096,
@@ -54,6 +57,12 @@ class HELMConfig(PretrainedConfig):
         norm_eps = 1e-12,
         hidden_act = "swiglu",
         swiglu_s_init = 1.0,
+        base_lr = 3e-4,
+        min_lr = 3e-5,
+        bias = False,
+        use_ckpt = False,
+
+        # Tokenization and Data Collator Hyperparameters
         tokenizer_path = "answerdotai/ModernBERT-base",
         vocab_size = 50368,
         bos_token_id = 50281,
@@ -64,19 +73,38 @@ class HELMConfig(PretrainedConfig):
         mlm_probability = 0.3,
         mlm_use_span_masking = True,
         mlm_span_length = 3,
+
+        # Router Hyperparameters
         num_router_latents = 4,
-        max_active_heads = 5,
         num_permanent_heads = 2,
         selection_threshold = 0.5,
-        router_init_scale = 10.0,
-        jitter_noise = 0.01,
-        sparsity_lambda = 0.01, 
-        router_aux_loss_coeff = 0.02,
-        router_grad_clip = 0.05,    
-        sparsity_warm_up_steps = 2000,
+        router_init_scale = 1.0,
         use_sigmoid_scaling = False,
+        jitter_noise = 0.01,
+        router_grad_clip = 0.05,    
+        dense_warmup_steps = 2000, 
+        
+
+        # Router Sparsity Hyperparameters
+        sparsity_lambda = 0.01,
+        sparsity_warm_up_steps = 4000, 
+        head_target_min = 4,
+        head_target_center = 8,
+        head_target_max = 16,
+        easiness_cdf_breakpoints = None,
+        sparsity_slack_lo = 1.0,
+        sparsity_slack_hi = 2.0,  
+
+        # Router Auxiliary Hyperparameters:
+        aux_coeff_start = 0.02,
+        aux_coeff_floor = 0.002,
+        aux_anneal_start = 67000,
+        aux_anneal_steps = 50000, 
+
+        # ngpt self attention and ffn hyperparameters
         ngpt_sqk_init_value = 1.0,  
         ngpt_sqk_init_scale = 0.03125,
+        use_exclusive_attention = True,
         ngpt_alpha_value_attn = 0.05,
         ngpt_alpha_scale_attn = 0.03125,
         ngpt_alpha_value_mlp = 0.05,
@@ -85,12 +113,10 @@ class HELMConfig(PretrainedConfig):
         ngpt_suv_scale = 1.0,
         ngpt_sz_init_value = 1.00,
         ngpt_sz_init_scale = 0.03125,
-        bias = False,
-        use_ckpt = False,
-        lr = 15e-4,
-        use_exclusive_attention = True,
+
         **kwargs 
     ):  
+        # General Model Hyperparameters
         self.hidden_size = hidden_size
         self.sqrt_hidden_size = sqrt_hidden_size
         self.max_position_embeddings = max_position_embeddings
@@ -102,6 +128,12 @@ class HELMConfig(PretrainedConfig):
         self.norm_eps = norm_eps
         self.hidden_act = hidden_act 
         self.swiglu_s_init = swiglu_s_init
+        self.base_lr = base_lr
+        self.min_lr = min_lr
+        self.bias = bias
+        self.use_ckpt = use_ckpt,
+
+        # Tokenization and Data Collator Hyperparameters
         self.tokenizer_path = tokenizer_path
         self.vocab_size = vocab_size
         self.bos_token_id = bos_token_id
@@ -112,20 +144,37 @@ class HELMConfig(PretrainedConfig):
         self.mlm_probability = mlm_probability
         self.mlm_use_span_masking = mlm_use_span_masking
         self.mlm_span_length = mlm_span_length
+
+        # Router Hyperparameters
         self.num_router_latents = num_router_latents
-        self.max_active_heads = max_active_heads
         self.num_permanent_heads = num_permanent_heads
-        self.num_elastic_heads = max_active_heads - num_permanent_heads
         self.selection_threshold = selection_threshold
         self.router_init_scale = router_init_scale
-        self.jitter_noise = jitter_noise
-        self.sparsity_lambda = sparsity_lambda
-        self.router_aux_loss_coeff = router_aux_loss_coeff
-        self.router_grad_clip = router_grad_clip     
-        self.sparsity_warm_up_steps = sparsity_warm_up_steps
         self.use_sigmoid_scaling = use_sigmoid_scaling
+        self.jitter_noise = jitter_noise
+        self.router_grad_clip = router_grad_clip     
+        self.dense_warmup_steps = dense_warmup_steps
+
+        # Router Sparsity Hyperparameters
+        self.sparsity_lambda = sparsity_lambda
+        self.sparsity_warm_up_steps = sparsity_warm_up_steps
+        self.head_target_min = head_target_min
+        self.head_target_center = head_target_center 
+        self.head_target_max = head_target_max 
+        self.easiness_cdf_breakpoints = easiness_cdf_breakpoints
+        self.sparsity_slack_lo = sparsity_slack_lo
+        self.sparsity_slack_hi = sparsity_slack_hi  
+
+        # Router Auxiliary Hyperparameters:
+        self.aux_coeff_start = aux_coeff_start
+        self.aux_coeff_floor = aux_coeff_floor
+        self.aux_anneal_start = aux_anneal_start
+        self.aux_anneal_steps = aux_anneal_steps
+
+        # ngpt self attention and ffn hyperparameters
         self.ngpt_sqk_init_value = ngpt_sqk_init_value
         self.ngpt_sqk_init_scale = ngpt_sqk_init_scale
+        self.use_exclusive_attention = use_exclusive_attention
         self.ngpt_alpha_value_attn = ngpt_alpha_value_attn
         self.ngpt_alpha_scale_attn = ngpt_alpha_scale_attn
         self.ngpt_alpha_value_mlp = ngpt_alpha_value_mlp
@@ -134,12 +183,9 @@ class HELMConfig(PretrainedConfig):
         self.ngpt_suv_scale = ngpt_suv_scale
         self.ngpt_sz_init_value = ngpt_sz_init_value
         self.ngpt_sz_init_scale = ngpt_sz_init_scale
-        self.bias = bias
-        self.use_ckpt = use_ckpt
-        self.lr = lr
-        self.use_exclusive_attention = use_exclusive_attention
 
         super().__init__(**kwargs)
+
 
 
 # Define Embedding Layer
@@ -170,6 +216,7 @@ class HELMEmbedding(nn.Module):
 
 
 
+
 # NOVEL: Multi-Latent Summary Router to decide which heads to use
 class HELMMultiViewRouter(nn.Module):
    
@@ -184,7 +231,8 @@ class HELMMultiViewRouter(nn.Module):
         # Yoink some things from config
         self.config = config
         self.scale = config.sqrt_hidden_size
-        self.num_elastic_heads = self.config.num_elastic_heads
+        self.num_elastic_candidates = config.num_attention_heads - config.num_permanent_heads
+
 
         # Summary Query Matrix size() : [hidden_size, num_router_latents]
         self.q_down_proj = nn.Linear(
@@ -209,9 +257,46 @@ class HELMMultiViewRouter(nn.Module):
             bias = config.bias
         )
 
+    # Map BT_easiness -> Target # of heads
+    # Problem: most of the BT_easiness_score are around .34 mark
+    # We need to now center the BT easiness around the median, where a score with 0.34 should be assigned to 8/16 heads should, not 0.5
+    def _easiness_to_target(self, sigmoid_scores, easiness_score):
+
+        batch = sigmoid_scores.size(0)
+        device = sigmoid_scores.device
+        total_heads = self.config.num_attention_heads
+        permanent_heads = self.config.num_permanent_heads
+
+        # Get Bucket Target Values (or default to these )
+        h_min = float(getattr(self.config, "head_target_min", permanent_heads + 2))
+        h_ctr = float(getattr(self.config, "head_target_center", 0.5 * (h_min + total_heads)))
+        h_max = float(getattr(self.config, "head_target_max", total_heads))
+
+        # I clamped theses values before, but we'll do it here just in case
+        # Size: [batch] (of easiness_score)
+        easiness_score = easiness_score.to(torch.float32).view(batch).clamp(0.0,1)
+        bp = getattr(self.config, "easiness_cdf_breakpoints", None)
+
+        # Convert the breakpoints to device
+        breaks = torch.as_tensor(bp, device = device, dtype=torch.float32)
+        num_breaks = breaks.numel() - 1
+        pos = torch.searchsorted(breaks, easiness_score, right=True).clamp(1, num_breaks)
+        lo = breaks[pos - 1]; hi = breaks[pos]
+        frac_in = (easiness_score - lo) / (hi - lo + 1e-8)
+        q = ((pos - 1).to(torch.float32) + frac_in) / num_breaks
+        q = q.clamp(0.0, 1.0)
+        hard = q < 0.5
+        t_hard = h_ctr + (h_max - h_ctr) * (0.5 - q) / 0.5
+        t_easy = h_ctr + (h_min - h_ctr) * (q - 0.5) / 0.5
+        t_total = torch.where(hard, t_hard, t_easy)
+        
+        return (t_total - permanent_heads).clamp(0.0, float(total_heads - permanent_heads)) 
+
     # Pass in only Hidden States 
     # Don't pass in attention mask bc theres no attention here (duh)
-    def forward(self, hidden_states, step_tensor):
+    def forward(self, hidden_states, step_tensor, easiness_score):
+
+        #################### FINALIZED LOGIC ####################
 
         # Write vars for cleaner code
         q_down_proj = self.q_down_proj
@@ -219,7 +304,6 @@ class HELMMultiViewRouter(nn.Module):
         tau = self.tau
         q_up_proj = self.q_up_proj 
         scale = self.scale
-        num_elastic_heads = self.num_elastic_heads
         self.selection_threshold = self.config.selection_threshold
 
         # Norm Query Matrix
@@ -244,9 +328,6 @@ class HELMMultiViewRouter(nn.Module):
         # Could've transposed, but this is more memory efficient
         latents = torch.bmm(scanner_softmax, hidden_states)
 
-        # # Normalize the latents (or should we???)
-        # latents = justnorm(latents)
-
         # Scale latents by Learnable important parameters (l_i_weights)
         # Softmax them first
         l_i_weights = F.softmax(l_i_weights, dim = 0)
@@ -255,66 +336,44 @@ class HELMMultiViewRouter(nn.Module):
         # Sum the Latents together
         # Size: ([b, num_router_latents, hidden_size] * broadcast [1, num_router_latents, 1]) and sum the latents = [b, 1 (size of pooled_latents when we added them together), hidden_size]
         pooled_latents = (latents * l_i_weights.view(1, -1, 1)).sum(dim=1, keepdim = True)
-
-        # # Normalize again (per nGPT requirements)
-        # # Or should we? We need the weight of these latents so that sigmoid actually does its job
-        # # Technically tau tries to help it, but maybe commenting this out makes more sense
-        # pooled_latents = justnorm(pooled_latents)
         
         # Normalize q_up_proj      
         # Requires .weight since the matrix was defined before
-        # size [num_permanent_heads - num_elastic_heads, hidden_size]
+        # size [total_elastic_heads, hidden_size]
         q_up_proj = justnorm(q_up_proj.weight, dim = 1).to(pooled_latents.dtype)
 
         # Multiply the latents by the classifer (q_up_proj)
         # Call it "class_scores"
-        # Size: [b, 1, hidden_size] * [hidden_size, num_permanent_heads - num_elastic_heads] = [b, 1, num_permanent_heads - num_elastic_heads]
+        # Size: [b, 1, hidden_size] * [hidden_size, total_elastic_heads] = [b, 1, total_elastic_heads]
         class_scores = F.linear(pooled_latents, q_up_proj)
 
         # Multiply this by Tau (router_init_scale) and ngpt scaler sqrt(hidden_size), or should we???
-        class_scores = class_scores * tau  # * scale
+        class_scores = class_scores * tau
 
         # Sigmoid Scores
-        # Size: still [b, 1, num_permanent_heads - num_elastic_heads], but with sigmoid scores
+        # Size: still [b, 1, total_elastic_heads], but with sigmoid scores
         sigmoid_scores = torch.sigmoid(class_scores)
 
-        # NEW SELECTION STRATEGY: #########################
-        # To prevent recompiling during top-k to threshold, we will move onto a slightly more refined approach:
+        #################### FINALIZED LOGIC ENDS HERE ####################
+        
+        # Hard Mask: of 1s and 0s based on whether the sigmoid score > threshold (0.5)
+        # Size: [b, 1, total_elastic_heads]
+        flat_mask = (sigmoid_scores > self.selection_threshold).float()
 
+        # Dense warmup: ensure all heads are active before dense_warmup_steps
+        dense_warmup_steps = self.config.dense_warmup_steps
+        in_dense_warmup = step_tensor < dense_warmup_steps
+        # Use where pattern to un-mask
+        # torch.ones_like (copies all metadata (device, datatype)) ; torch.ones requires you to define all metadata + shape
+        flat_mask = torch.where(in_dense_warmup, torch.ones_like(flat_mask), flat_mask)
 
-        # Apply top_k logic:
-        # indices dimension: [batch_size, 1, num_elastic_heads]
-        _, indices = sigmoid_scores.topk(num_elastic_heads, dim = -1)
-        # topk_mask size sum([b, 1, num_elastic_heads,num_permanent_heads - num_elastic_heads]) of the 3rd dimension = [b, 1 ,num_permanent_heads - num_elastic_heads]
-        # Look at how one_hot works: https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.one_hot.html
-        topk_mask = F.one_hot(indices, num_classes=sigmoid_scores.size(-1)).sum(dim=2).float()
-
-        # Also calculate threshold mask:
-        # indices dimension: [batch_size, 1, num_elastic_heads] (we just 0'd the sigmoid_scores values that are less then selection_threshold)
-        threshold_mask = (sigmoid_scores > self.selection_threshold).float()
-
-        # determine which phase of training this is in
-        is_warmup = step_tensor < self.config.sparsity_warm_up_steps
-
-        # Based on is_warmup, either use topk or threshold
-        # flat_mask size [b, 1, num_permanent_heads - num_elastic_heads] (choose topk or threshold):
-        # This is slightly bad for GPUs (since its a waste to calculation both), but at least the TPU doesn't have to recompile
-        flat_mask = torch.where(is_warmup, topk_mask, threshold_mask)
-    
-        # # ###############################################
-
-        # Telemetrics Hooks for derived / intermediate weights
-        # Save which heads the model decided (flat_mask)
-        # Save the sigmoid scores (sigmoud_scores)
+        # Telemetry hooks
         self.save_flat_mask = flat_mask.detach()
         self.save_sigmoid_scores = sigmoid_scores.detach()
 
         # use_sigmoid_scaling = True: router_mask = Sigmoid values and 0s (Accuracy)
         # use_sigmoid_scaling = False: router_mask = 1s and 0s (Efficiency)
-        if self.config.use_sigmoid_scaling:
-            # Scale back to sigmoid scores
-            flat_mask = flat_mask * sigmoid_scores
-
+        flat_mask = flat_mask * sigmoid_scores if self.config.use_sigmoid_scaling else flat_mask
 
         # Apply STE for Dead Router Heads during backprop
         # Must happen after sigmoid_scaling or else torch could believe the sigmoid scaling are dynamically linked
@@ -323,7 +382,7 @@ class HELMMultiViewRouter(nn.Module):
         # Backward pass: sigmoid_scores
         flat_mask = flat_mask.detach() - sigmoid_scores.detach() + sigmoid_scores
 
-        # Add attention dimensions: [b, 1, num_permanent_heads - num_elastic_heads] -> [b, num_elastic_heads, 1, 1]
+        # Add attention dimensions: [b, 1, total_elastic_heads] -> [b, num_elastic_heads, 1, 1]
         router_mask = flat_mask.view(flat_mask.size(0), -1, 1, 1)
 
         # If permanent_heads are used, add the columns 
@@ -338,30 +397,69 @@ class HELMMultiViewRouter(nn.Module):
                 dtype=router_mask.dtype
             )
             router_mask = torch.cat((permanent_head_scores, router_mask), dim = 1)
-
-        # Calculate Training Losses Here:
-        if self.training:
-            # aux_loss: ensure that the router doesn't route the same head everytime (ignoring permanent heads)
-            # Take each sequence in the batch, and average the sigmoid score within each head
-            # squeeze = remove all dims = 1
-            # size: [b, 1, num_permanent_heads - num_elastic_heads] -> [num_permanent_heads - num_elastic_heads]
-            P = sigmoid_scores.mean(dim=0).squeeze()
-            # Take each sequence in the batch, and average the sigmoid score only for the ones passing the threshold
-            # If for example they all routed
-            # size: [num_permanent_heads - num_elastic_heads]
-            f = (sigmoid_scores > self.selection_threshold).float().mean(dim=0).squeeze() # Best approx of hard_mask here
-            # Dot P*f and multiply by the number of elastic heads. This is the aux_loss
-            raw_aux_loss = self.num_elastic_heads * torch.sum(f * P)
-            self.aux_loss = self.config.router_aux_loss_coeff * raw_aux_loss
         
-            # sparsity_loss: ensure that the model doesn't just turn on all the heads
+        #################### LOSS CALCULATIONS ####################
+        # In both previous implementations, the model could cheat by turning off all the heads to reduce loss
+        # The old formulas were okay for scores passed into variant activations (softmax), but breaks at invariant activation (sigmoid)
+        # We need to solve this by redefining how these losses are being calculated
 
-            # Apply sparsity annealing for warm_up
-            sparsity_warm_up_scale = torch.clamp(step_tensor / self.config.sparsity_warm_up_steps, max = 1.0)
+        if self.training:
 
-            # Multiply set scaling factor (sparsity_lamdba) by the mean of the sigmoid_scores (remember sigmoid scores don't add up to 1)
-            self.sparsity_loss = sparsity_warm_up_scale * self.config.sparsity_lambda * sigmoid_scores.mean()
+            # Generate the target-head count from easiness (soft PRIOR; CE can override a wrong label)
+            elastic_target_num_heads =  self._easiness_to_target(sigmoid_scores, easiness_score)
 
+            # ########## SPARSITY ##########: Ensure the correct # of heads are being activated
+
+            # Why not count the number of heads to use > 0.5 ? Ans: > produces gradients of 0. Plus, we don't account for on edge heads (i.e .49)
+            # By using the sum of the sigmoid scores along the head dimension, the gradient sees the proportion to how "almost on" heads are
+            # Just think about this as how many heads should be on?
+            num_head_preds = sigmoid_scores.squeeze(1).sum(-1)
+
+            # Define our lower and upper clearances
+            slack_lo = self.config.sparsity_slack_lo
+            slack_hi = self.config.sparsity_slack_hi
+
+            # WOW check this out:
+            # If the computed value is < 0, then it becomes 0 (relu)
+            # preds - upperbound for the over (If its less than the upperbound -> 0)
+            # lowerbound - preds for the under (If its greater than the lowerbound -> 0)
+            # We can define an over or under this way
+            over = torch.relu(num_head_preds - (elastic_target_num_heads + slack_hi))
+            under = torch.relu((elastic_target_num_heads - slack_lo) - num_head_preds)
+            # Squared Sum penalty to extremely punish big changes
+            raw_sparsity = (over**2 + under**2).mean()
+            # Sparsity warmup
+            # Denom: fixed. sparsity starts at 0 and reach 1 when step tensor reaches it
+            denom = max(1, self.config.sparsity_warm_up_steps)
+            # Ramp: go from 0 -> 1 starting at dense_warm_up -> sparsity_warm_up_steps + dense_warm_up
+            ramp = torch.clamp((step_tensor.float() - dense_warmup_steps) / denom, 0.0, 1.0)
+            self.sparsity_loss = ramp * self.config.sparsity_lambda * raw_sparsity
+
+            # ########## SPARSITY ENDS ##########
+
+            # ########## AUXILIARY BEGINS ##########
+            # aux_loss: ensure that the router doesn't route the same head everytime (even routing)
+            # This needs to be designed so its scale invariant (or else collapse will be encouraged)
+            # CV^2 (coeff of variation^2) of per-head usage
+
+            # First calculate the average sigmoid value per head in all the seqs in the batch
+            # Size: [num_elastic_heads]
+            head_avg_scores = sigmoid_scores.squeeze(1).mean(0)
+            cv2 = head_avg_scores.var(unbiased = False) / (head_avg_scores.mean()**2 + 1e-6)
+
+            # Yoink from config
+            aux_start = self.config.aux_coeff_start
+            aux_floor = self.config.aux_coeff_floor
+            aux_begin = self.config.aux_anneal_start
+            aux_steps = self.config.aux_anneal_steps
+
+            # aux_frac: go from 1 -> 0 starting at aux_anneal_start -> aux_anneal_start + aux_anneal_steps
+            aux_frac = torch.clamp((step_tensor.float() - aux_begin) / aux_steps, 0.0, 1.0)
+            aux_coeff = aux_start + (aux_floor - aux_start) * aux_frac
+            self.aux_loss = aux_coeff * cv2
+
+            # ########## AUXILIARY ENDS ##########
+ 
         else:
             self.aux_loss = torch.tensor(0.0, device=hidden_states.device)
             self.sparsity_loss = torch.tensor(0.0, device=hidden_states.device)
@@ -438,6 +536,7 @@ class RotaryEmbeddings(nn.Module):
 # Use RoPE
 # Output Matrix
 # Speicfics about training (masked training)
+# MODIFICATION: USE FLEX ATTENTION TO ALLOW FOR BATCHED INFERENCE
 class HELMSelfAttention(nn.Module):
 
     # Initialize the following:
@@ -452,12 +551,17 @@ class HELMSelfAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.num_attention_heads = config.num_attention_heads
         self.num_permanent_heads = config.num_permanent_heads
-        self.num_elastic_heads = config.num_elastic_heads
         self.d_head = config.hidden_size // config.num_attention_heads
         self.ngpt_sqk_init_value = config.ngpt_sqk_init_value
         self.ngpt_sqk_init_scale = config.ngpt_sqk_init_scale
         self.config = config
 
+        self._eval_backend = "dense"
+        self._flex_compiled = False
+        self._flex_fn = None
+        self._block_mask_fn = None
+
+        
         # QKV Matrix
         self.qkv = nn.Linear(
             config.hidden_size,
@@ -481,6 +585,29 @@ class HELMSelfAttention(nn.Module):
             config.hidden_size,
             bias = config.bias
         )
+
+    # Configure the eval-time attention backend. Call via model.enable_efficient_inference(...).
+    #   backend="flex"  : FlexAttention; set compile=True on GPU for the fused kernel (recommended).
+    #   backend="gather": compact gather/scatter SDPA, no torch.compile needed.
+    #   backend="dense" : compute-all-then-mask (default; what training uses).
+    def set_eval_backend(self, backend="flex", compile=True):
+        self._eval_backend = backend
+        self._flex_compiled = bool(compile)
+        self._flex_fn = None
+        self._block_mask_fn = None
+
+    def _flex_attn(self, q, k, v, block_mask, scale):
+        if self._flex_fn is None:
+            from torch.nn.attention.flex_attention import flex_attention
+            self._flex_fn = torch.compile(flex_attention) if self._flex_compiled else flex_attention
+        return self._flex_fn(q, k, v, block_mask=block_mask, scale=scale)
+
+    def _build_block_mask(self, mask_mod, B, H, S, device):
+        if self._block_mask_fn is None:
+            from torch.nn.attention.flex_attention import create_block_mask
+            # compiling create_block_mask avoids materializing the full SxS mask for long sequences
+            self._block_mask_fn = torch.compile(create_block_mask) if self._flex_compiled else create_block_mask
+        return self._block_mask_fn(mask_mod, B, H, S, S, device=device)  
     
     # Define Training
     def forward(self, hidden_states, attention_mask, router_mask):
@@ -503,21 +630,25 @@ class HELMSelfAttention(nn.Module):
         # size(): [hidden_size]-> [1, num_attention_heads, 1, d_head]
         sqk = sqk.view(1, self.num_attention_heads, 1, self.d_head)
 
-        # If Batch > 1 or model is in training mode: Cutting Losses and broadcast the mask
-        if (batch_size > 1 or self.training):
+
+        eval_backend = self._eval_backend
+
+        # Reshape q,k,v
+        # q, k, v size(): [b, seq_len, num_attention_heads, d_head]
+        q = q.view(batch_size, seq_len, self.num_attention_heads, self.d_head)
+        k = k.view(batch_size, seq_len, self.num_attention_heads, self.d_head)
+        v = v.view(batch_size, seq_len, self.num_attention_heads, self.d_head)
+
+        # Reshape q,k,v
+        # q, k, v size(): [b, num_attention_heads, seq_len, d_head]
+        q = q.permute(0,2,1,3)
+        k = k.permute(0,2,1,3)
+        v = v.permute(0,2,1,3) 
+
+
+        # TRAINING / TPU MODE
+        if (self.training or eval_backend == "dense") and batch_size > 1:
             
-            # Reshape q,k,v
-            # q, k, v size(): [b, seq_len, num_attention_heads, d_head]
-            q = q.view(batch_size, seq_len, self.num_attention_heads, self.d_head)
-            k = k.view(batch_size, seq_len, self.num_attention_heads, self.d_head)
-            v = v.view(batch_size, seq_len, self.num_attention_heads, self.d_head)
-
-            # Reshape q,k,v
-            # q, k, v size(): [b, num_attention_heads, seq_len, d_head]
-            q = q.permute(0,2,1,3)
-            k = k.permute(0,2,1,3)
-            v = v.permute(0,2,1,3)
-
             # Normalize q and k
             q = justnorm(q)
             k = justnorm(k)
@@ -575,7 +706,60 @@ class HELMSelfAttention(nn.Module):
             # Project context onto the Output Matrix
             context_layer = cast_linear(context_reshaped, self.output)
 
-        # Apply splicing logic and win on efficiency.
+        # FLEX ATTENTION (for GPUs)
+        elif eval_backend == "flex" and batch_size > 1:
+
+             # Normalize q and k
+            q = justnorm(q)
+            k = justnorm(k)
+
+            # Apply RoPE
+            q = self.RoPE(q)
+            k = self.RoPE(k)
+
+            # Apply sqk scaling factor to q and k
+            q = sqk.to(q.dtype) * q 
+            k = sqk.to(k.dtype) * k 
+
+            # Router_mask scores, 1 or 0 or sigmoid scaling
+            # [b, num_attention_heads, 1 , 1] -> [batch, num_attention_heads]
+            active = (router_mask[:, :, 0, 0] > 0)
+
+            # Boolean attention mask 
+            # [batch_size, 1, 1, seq_len] -> [batch, seq_len]
+            key_valid = (attention_mask[:, 0, 0, :] >=0)
+
+            # mask_mod: attend / calculate only if the head is on and its not a padding token
+            def mask_mod(bi, hi, qi, ki):
+                return active[bi, hi] & key_valid[bi, ki]
+            
+            # Prep the block to be passed into flex attention
+            block_mask = self._build_block_mask(
+                mask_mod, batch_size, self.num_attention_heads,seq_len, q.device
+            )
+
+            # Apply flex attention
+            context_layer = self._flex_attn(
+                q, k, v, blok_mask = block_mask, scale = math.sqrt(self.d_head)
+            )
+
+            # Add Exclusive Attention (better results?)
+            if (self.config.use_exclusive_attention):
+                Vn = torch.nn.functional.normalize(v, dim=-1)
+                context_layer = context_layer - (context_layer * Vn).sum(dim=-1, keepdim=True) * Vn
+            
+            # Apply router mask to 0 the heads of the context layer
+            # [batch, num attention heads, seq_len, head dim] (router_mask [batch, num_attention_heads, 1,1] was broadcasted)
+            context_layer = context_layer * router_mask.expand_as(context_layer)
+
+            # Flatten the last two dimensions: 
+            # size(): [b, seq_len, num_hidden_size] 
+            context_reshaped = context_reshaped.view(batch_size, seq_len, -1)
+
+            # Project context onto the Output Matrix
+            context_layer = cast_linear(context_reshaped, self.output)
+        
+        # Single query effieincy
         else:
 
             # Find the heads that are on
@@ -807,17 +991,8 @@ class HELMBlock(nn.Module):
         self.mlp = HELMMLP(config)
     
     # # Define the forward pass
-    # # Extra: Return the aux_loss from the router
-    # def forward(self, hidden_states, attention_mask, step_tensor):
-    #     router_mask = self.mlt_vw_rtr(hidden_states, step_tensor)
-    #     aux_loss = self.mlt_vw_rtr.aux_loss
-    #     sparsity_loss = self.mlt_vw_rtr.sparsity_loss
-    #     attn_output = self.attn(hidden_states, attention_mask, router_mask)
-    #     layer_output = self.mlp(hidden_states, attn_output)
-    #     return layer_output, aux_loss, sparsity_loss
-    # def forward(self, hidden_states, attention_mask, seg_ids, step_tensor):
-    def forward(self, hidden_states, attention_mask, step_tensor):
-        router_mask = self.mlt_vw_rtr(hidden_states, step_tensor)
+    def forward(self, hidden_states, attention_mask, step_tensor, easiness_score = None):
+        router_mask = self.mlt_vw_rtr(hidden_states, step_tensor, easiness_score)
         aux_loss = self.mlt_vw_rtr.aux_loss
         sparsity_loss = self.mlt_vw_rtr.sparsity_loss
         attn_output = self.attn(hidden_states, attention_mask, router_mask)
@@ -848,7 +1023,7 @@ class HELMModel(nn.Module):
         
     
     # Forward Pass
-    def forward(self, input_ids, attention_mask, current_step = None):
+    def forward(self, input_ids, attention_mask, current_step = None, easiness_score = None):
 
         # Build additive mask for SDPA fallback
         # Reshape Additive Mask to be 4D for SDPA [batch_size, 1, 1, seq_len]
@@ -883,13 +1058,13 @@ class HELMModel(nn.Module):
                     block,
                     hidden_states, 
                     attention_mask,
-                    # seg_ids, 
                     step_tensor,
+                    easiness_score,
                     use_reentrant=False
                 )
             # Or Standard Forward Pass
             else:
-                hidden_states, aux_loss, sparsity_loss = block(hidden_states, attention_mask, step_tensor)
+                hidden_states, aux_loss, sparsity_loss = block(hidden_states, attention_mask, step_tensor, easiness_score)
                 
             total_aux_loss += aux_loss
             total_sparsity_loss += sparsity_loss
@@ -945,6 +1120,17 @@ class HELMForMaskedLM(PreTrainedModel):
         # If it's an nn.Linear, initialize it with the initializer_range also)
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=self.config.initializer_range)
+
+    # Define Function to normalize_ngpt_matrices
+    # Flip every self-attention layer into an efficient eval backend for GPU inference.
+    # Leave this OFF for TPU training/validation (the default "dense" path is static-shape friendly).
+    #   model.eval(); model.enable_efficient_inference("flex")        # GPU, fused (recommended)
+    #   model.eval(); model.enable_efficient_inference("gather")      # no torch.compile needed
+    # On GPU also wrap inference in torch.compile, or pass compile=True (default) to fuse flex.
+    def enable_efficient_inference(self, backend="flex", compile=True):
+        for block in self.model.blocks:
+            block.attn.set_eval_backend(backend=backend, compile=compile)
+        return self
 
     # Define Function to normalize_ngpt_matrices
     def normalize_ngpt_matrices(self):
@@ -1058,11 +1244,11 @@ class HELMForMaskedLM(PreTrainedModel):
 
 
     # Forward pass
-    def forward(self, input_ids, attention_mask, current_step = None):
+    def forward(self, input_ids, attention_mask, current_step = None, easiness_score = None):
 
         # Gather Context from the model
         # features: [b, seq_len, hidden_size]
-        features, total_aux_loss, total_sparsity_loss = self.model(input_ids, attention_mask, current_step)
+        features, total_aux_loss, total_sparsity_loss = self.model(input_ids, attention_mask, current_step, easiness_score)
 
         # Scale / prepare sz
         sz = self.sz * (self.ngpt_sz_init_value / self.ngpt_sz_init_scale)

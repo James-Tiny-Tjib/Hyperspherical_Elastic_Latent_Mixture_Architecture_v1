@@ -301,7 +301,35 @@ Created this log to help me document what is happening
         step_1 tokenizes all the datasets into 512 chunks, packs into parquets and makes Repo
         step_2 takes all the repos and evenly distrubute all the data from the datasets and repacks them into parquets
         step_3 uses TPU to perform inference between fine-tuned BT_scorer and data, scoring and merging 512 blocks to become 1024, 2048, 4096 (since bt_scorer had a context window of 512)
+    Following Repos were used:
+        "JamesResearch1216/ModernBERT-512-pubmed_simple"
+        "JamesResearch1216/ModernBERT-512-arxiv-abstracts-large"
+        "JamesResearch1216/ModernBERT-512-govreport-summarization"
+        "JamesResearch1216/ModernBERT-512-TTCW-Based-Review"
+        "JamesResearch1216/ModernBERT-512-fineweb"
+        "JamesResearch1216/ModernBERT-512-wikihow-cleaned"
+        "JamesResearch1216/ModernBERT-512-simple_wikipedia_LM"
+        "JamesResearch1216/ModernBERT-512-reddit-title-body"
+        "JamesResearch1216/ModernBERT-512-Amazon_Reviews_Binary_for_Sentiment_Analysis"
+        "JamesResearch1216/ModernBERT-512-yelp_review_full"
+        "JamesResearch1216/ModernBERT-512-review_corpus"
+        "JamesResearch1216/ModernBERT-512-TinyStories"
+        "JamesResearch1216/ModernBERT-512-SimpleStories"
+    v2 did not have as many easy tokens
+    new easier datasets were mixed and added in v3
+    Kaggle's default dependencies threw some nasty errors when running the p100 on test-bt-easiness-v5.ipynb. More investigation is needed
+    I need to add LR scheduler
+    I need to modify the loss function
 
+6/6 - 6/14:
+    Added LR scheduler
+    Completely redid the loss functions:
+        The previous loss functions were designed for softmaxxed activation
+            - They relied on total sums, but softmax adds up to 1 whereas sigmoid does not
+            - sigmoid was intentionally choosen so that the model can pick multiple heads and have multiple pass the threshold (0.5)
+            - however, because they relied on the total sums, and sigmoid values are independent, they are all be driven to 0 and collapse the router
+        Therefore, 
+        AUX uses a cv^2 (constant * variance ^ 2) head-number invariant 
 
 
 
@@ -316,6 +344,7 @@ Created this log to help me document what is happening
 
 Goals:
     create async process to load the parquets without pausing the entire script
+    possibly create a drop in replacement for the flex attention via custom triton kernel????
     Fix Router Implementation and Behavior 
     TRAIN DIS SHIIIIII RAWWWHHHHHHHH 😈😈😈😈😈
 

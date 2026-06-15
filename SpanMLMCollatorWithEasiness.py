@@ -1,4 +1,4 @@
-%%writefile SpanMLMCollator.py
+%%writefile SpanMLMCollatorWithEasiness.py
 import torch
 from torch.utils.data import DataLoader
 from datasets import load_dataset
@@ -21,7 +21,7 @@ class ConfigJson():
 
 
 
-class SpanMLMCollator:
+class SpanMLMCollatorWithEasiness:
 
     # Define Init
     # Most of the things are just stored in the config lwk
@@ -72,7 +72,7 @@ class SpanMLMCollator:
         batch_input_ids = [d["input_ids"] for d in data]
         input_ids = torch.tensor(batch_input_ids)
         labels = input_ids.clone()
-        easiness_scores = torch.tensor([d["easiness_score"] for d in data], dtype=torch.float32)
+        easiness_score = torch.tensor([d["easiness_score"] for d in data], dtype=torch.float32)
 
         # Set mlm_prob
         mlm_prob = self.mlm_probability
@@ -146,4 +146,4 @@ class SpanMLMCollator:
         # ############################################################
 
         # Return Dictionary
-        return {"input_ids": input_ids, "labels": labels, "easiness_scores": easiness_scores}
+        return {"input_ids": input_ids, "labels": labels, "easiness_score": easiness_score}
