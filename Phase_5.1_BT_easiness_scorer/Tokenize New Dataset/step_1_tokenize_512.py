@@ -1,21 +1,22 @@
 ######################################################
-# Tokenizes into 512 token-blocks & pack into parquets
-# Uses ModernBert's Tokenizer
-# Uses checkpointing features in case of a crash
-# Takes 10 Billion Tokens from the sources below
+# Step 1: tokenize raw sources into uniform 512-token blocks
+# - ModernBERT tokenizer
+# - DETERMINISTIC document-level train/val split (content hash)
+#       * a whole document goes ENTIRELY to train OR validation, never both
+#       * train docs and val docs are packed into SEPARATE 512-block streams
+#       * identical text always routes to the same split (free exact-dup dedup)
+# - per-source checkpointing via progress.json
 ##################################################
 
-# Import Libraries
-# !pip install -U transformers datasets huggingface_hub tqdm pyarrow psutil
 from transformers import AutoTokenizer
 import datasets
 from datasets import load_dataset
-import torch
-from tqdm import tqdm
 import huggingface_hub
 import pyarrow
 import multiprocessing
 import math
+import hashlib
+from collections import deque
 from itertools import chain, islice
 import json
 import os
@@ -27,395 +28,226 @@ from huggingface_hub.utils import RepositoryNotFoundError
 # --- CONFIGURATION ---
 LENGTH = 512
 SHARD_TOKEN_NUM = 1e8
-VALIDATION_MODE = False  # Set to True for Run 1, False for Run 2
-CRASH_NUMBER = 0
-SOURCES = [
-    {
-        "path" : "HuggingFaceFW/fineweb",
-        "name" : "sample-10BT",
-        "split" : "train",
-        "col_name" : "text",
-        "token_cap" : 4e9,
-        "num_val_rows" : 200
-    },
-    {
-        "path" : "roneneldan/TinyStories",
-        "name" : None,
-        "split" : "train",
-        "col_name" : "text",
-        "token_cap" : -1,
-        "num_val_rows" : 200
-    },
-    {
-        "path" : "SimpleStories/SimpleStories",
-        "name" : None,
-        "split" : "train",
-        "col_name" : "story",
-        "token_cap" : -1,
-        "num_val_rows" : 200
 
-    },
-    {
-        "path" : "UniverseTBD/arxiv-abstracts-large",
-        "name" : None,
-        "split" : "train",
-        "col_name" : "abstract",
-        "token_cap" : -1,
-        "num_val_rows" : 200           
-    },
-    {
-        "path" : "japhba/pubmed_simple",
-        "name" : None,
-        "split" : "train",
-        "col_name" : "abstract",
-        "token_cap" : -1,
-        "num_val_rows" : 200      
-    },
-    {
-        "path" : "ccdv/govreport-summarization",
-        "name" : None,
-        "split" : "train",
-        "col_name" : "report",
-        "token_cap" : -1,
-        "num_val_rows" : 200       
-    },
-    {
-        "path" : "VibrantVista/TTCW-Based-Review",
-        "name" : None,
-        "split" : "train",
-        "col_name" : "regenerated_story",
-        "token_cap" : 1e9,
-        "num_val_rows" : 200        
-    },
-    {
-        "path" : "pszemraj/simple_wikipedia_LM",
-        "name" : "default",
-        "split" : "train",
-        "col_name" : "text",
-        "token_cap" : -1,
-        "num_val_rows" : 200    
-    },
-    {
-        "path" : "sentence-transformers/reddit-title-body",
-        "name" : None,
-        "split" : "train",
-        "col_name" : "body",
-        "token_cap" : 2.5e9,
-        "num_val_rows" : 200    
-    },
-    {
-        "path" : "gursi26/wikihow-cleaned",
-        "name" : None,
-        "split" : "train",
-        "col_name" : "text",
-        "token_cap" : -1,
-        "num_val_rows" : 200    
-    },
+# ---- THE single source of truth for the train/val split ----
+# Whole-document routing by content hash. Change VAL_FRACTION to resize validation;
+# change HASH_SALT to reshuffle which documents are held out.
+VAL_FRACTION = 0.002          # ~0.2% of tokens -> validation (~20M tokens on a 10B corpus)
+HASH_SALT    = "helm-v3-split"
+
+def doc_split(text):
+    key = (HASH_SALT + (text or "").strip()).encode("utf-8")
+    bucket = int(hashlib.md5(key).hexdigest()[:8], 16) / 0x100000000   # in [0, 1)
+    return "validation" if bucket < VAL_FRACTION else "train"
+
+SOURCES = [
+    {"path": "HuggingFaceFW/fineweb", "name": "sample-10BT", "split": "train", "col_name": "text", "token_cap": 4e9},
+    {"path": "roneneldan/TinyStories", "name": None, "split": "train", "col_name": "text", "token_cap": -1},
+    {"path": "SimpleStories/SimpleStories", "name": None, "split": "train", "col_name": "story", "token_cap": -1},
+    {"path": "UniverseTBD/arxiv-abstracts-large", "name": None, "split": "train", "col_name": "abstract", "token_cap": -1},
+    {"path": "japhba/pubmed_simple", "name": None, "split": "train", "col_name": "abstract", "token_cap": -1},
+    {"path": "ccdv/govreport-summarization", "name": None, "split": "train", "col_name": "report", "token_cap": -1},
+    {"path": "VibrantVista/TTCW-Based-Review", "name": None, "split": "train", "col_name": "regenerated_story", "token_cap": 1e9},
+    {"path": "pszemraj/simple_wikipedia_LM", "name": "default", "split": "train", "col_name": "text", "token_cap": -1},
+    {"path": "sentence-transformers/reddit-title-body", "name": None, "split": "train", "col_name": "body", "token_cap": 2.5e9},
+    {"path": "gursi26/wikihow-cleaned", "name": None, "split": "train", "col_name": "text", "token_cap": -1},
+    {"path": "Yelp/yelp_review_full", "name": None, "split": "train", "col_name": "text", "token_cap": -1},
+    {"path": "yassiracharki/Amazon_Reviews_Binary_for_Sentiment_Analysis", "name": None, "split": "train", "col_name": "review_text", "token_cap": -1},
+    {"path": "yyu/review_corpus", "name": None, "split": "train", "col_name": "text", "token_cap": -1},
 ]
 # --------------------------
 
 
-# Get HF_TOKEN and WANDB_API_KEY
 def get_secret(key_name):
-
-    # Try Colab
     try:
         from google.colab import userdata
         return userdata.get(key_name)
-    except:
+    except Exception:
         pass
-
-    # Try Kaggle
     try:
         from kaggle_secrets import UserSecretsClient
         return UserSecretsClient().get_secret(key_name)
-    except:
+    except Exception:
         pass
-
-    # Local Env
     return os.getenv(key_name)
 
 hf_token = get_secret("HF_TOKEN")
 if hf_token is None:
-    print("⚠️ WARNING: HF_TOKEN could not be found! All uploads will fail.")
-api = HfApi(token = hf_token)
-
-# repo_id = ""
-# api.create_repo(repo_id = repo_id, repo_type = "dataset", exist_ok = True)
-
-progress = {
-    "last_shard" : -1,
-    "num_rows_processed": 0,
-    "num_tokens_processed": 0,
-    "num_samples_created" : 0
-}
+    print("WARNING: HF_TOKEN could not be found! All uploads will fail.")
+api = HfApi(token=hf_token)
 
 
-# progress.json retrieval
-def retrieve_progress_from_hub(repo_id, filename = "progress.json"):
+def fresh_progress():
+    return {
+        "last_train_shard": -1,
+        "last_val_shard": -1,
+        "num_rows_processed": 0,        # documents consumed (for resume skip)
+        "num_train_tokens": 0,
+        "num_val_tokens": 0,
+        "num_samples_created": 0,       # TRAIN 512-blocks  (step 2 reads THIS for mixing ratios)
+        "num_val_samples_created": 0,   # VALIDATION 512-blocks
+    }
+
+
+def retrieve_progress_from_hub(repo_id, filename="progress.json"):
     try:
-        path = hf_hub_download(repo_id=repo_id, filename = filename, repo_type = "dataset", token=hf_token)
+        path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset", token=hf_token)
         with open(path, "r") as f:
             progress = json.load(f)
-        print(f"Resuming from shard {progress['last_shard']}")
+        print(f"Resuming {repo_id}: {progress['num_rows_processed']} docs done, "
+              f"train shard {progress['last_train_shard']}, val shard {progress['last_val_shard']}")
+        # backfill any missing keys (forward-compat)
+        for k, v in fresh_progress().items():
+            progress.setdefault(k, v)
         return progress
     except RepositoryNotFoundError:
-        print(f"Repo: \"{repo_id}\" was not found on the Hub (or token is missing). Starting fresh.")
-        return {
-            "last_shard" : -1,
-            "num_rows_processed": 0,
-            "num_tokens_processed": 0,
-            "num_samples_created" : 0
-        }
+        print(f"Repo {repo_id} not found. Starting fresh.")
+        return fresh_progress()
     except Exception as e:
-        print(f"No progress file found. Starting fresh. (Notice: {e})")
-        return {
-            "last_shard" : -1,
-            "num_rows_processed": 0,
-            "num_tokens_processed": 0,
-            "num_samples_created" : 0
-        }
+        print(f"No progress file. Starting fresh. (Notice: {e})")
+        return fresh_progress()
 
 
-# progress.json push
-def push_progress_to_hub(progress, repo_id, filename = "progress.json"):
+def push_progress_to_hub(progress, repo_id, filename="progress.json"):
     try:
         with open(filename, "w") as f:
             json.dump(progress, f)
-        api.upload_file(
-            path_or_fileobj=filename,
-            path_in_repo=filename,
-            repo_id=repo_id,
-            repo_type="dataset"
-        )
+        api.upload_file(path_or_fileobj=filename, path_in_repo=filename,
+                        repo_id=repo_id, repo_type="dataset")
         return True
     except Exception as e:
-        print(f"❌ Failed to upload progress.json: {e}")
+        print(f"Failed to upload {filename}: {e}")
         return False
 
 
-def push_shard_to_hub(shard_data, progress, repo_id, progress_file, length, api, data_split):
-    
-    next_shard = progress["last_shard"] + 1
-    try:        
-
-        # # seq_1024, seq_2048, seq_4096 will be subsets (name)
-        # # Splits will be train and validation
-        config_name = f"seq_{length}"
-        filename = f"{data_split}-{next_shard:05d}.parquet"
-        repo_path = f"data/{config_name}/{filename}"
-        
-        # Convert shard_data -> dictionary -> HF dataset -> .parquet
-        ds_shard = datasets.Dataset.from_dict({"input_ids": shard_data})
-        ds_shard.to_parquet(filename)
-        
-        # 2. Upload the raw file directly to the Hub
-        api.upload_file(
-            path_or_fileobj=filename,
-            path_in_repo=repo_path,
-            repo_id=repo_id,
-            repo_type="dataset"
-        )
-        
-        # 3. Clear local disk so Kaggle/Colab doesn't run out of storage
-        os.remove(filename)
-
-        # Update Progress and Push to Hub
-        progress["last_shard"] = next_shard
-        push_progress_to_hub(progress, repo_id, progress_file)
-        
-        # Success Message 
-        print(f"✅ Shard {progress['last_shard']} uploaded successfully to {repo_path}.")
-        return True
-
-    except Exception as e:   
-
-        # You done messed up
-        print(f" ❌ Shard {progress['last_shard']} failed to upload: {e}")
-        return False
-
-
-# tokenization function (1 row)
-def tokenize_single_row(row):
-    if not row or not isinstance(row, str):
-        return []
-    tokenized_row = tokenizer(row, add_special_tokens=False)["input_ids"]
-    return tokenized_row + [tokenizer.sep_token_id]
-
-
-# Generator function to extract the text from the data_stream
-def extract_text(data_stream, col_name):
-    # Use for loop to extract the text from data_stream generator
+# Hash the document FIRST (in the main process), then tokenize in the worker.
+def split_texts(data_stream, col_name):
     for row in data_stream:
-        yield row[col_name]
+        text = row[col_name]
+        yield (doc_split(text), text)
 
 
-# Generator Function that returns the token list
-def parallel_token_stream(data_stream, pool, progress, chunksize, col_name):
-
-    # Define Generator Object 
-    text_generator = extract_text(data_stream, col_name)
-
-    # Use i(terable)map to iterate through and tokenize single rows
-    results = pool.imap(tokenize_single_row, text_generator, chunksize=chunksize)
-
-    # Use for loop to extract tokenized lists from results
-    for token_list in results:
-        # Increment documents processed
-        progress["num_rows_processed"] += 1 
-        # Yield / return 1 token list every time
-        yield token_list
+# Worker fn: returns (split, tokens). Keeps the split tag glued to its document's tokens.
+def tokenize_with_split(split_text):
+    split, text = split_text
+    if not text or not isinstance(text, str):
+        return (split, [])
+    toks = tokenizer(text, add_special_tokens=False)["input_ids"]
+    return (split, toks + [tokenizer.sep_token_id])
 
 
-# Generator function that pack Tokens into correct lengths
-def pack_tokens(data_chain, tokenizer, progress, max_examples=-1, length=512):
+# Packs a single split's token stream into uniform 512-blocks and uploads shards.
+# Train and validation each get their own writer, so their streams never touch.
+class ShardWriter:
+    def __init__(self, repo_id, split, shard_size, cls_id, progress, progress_file,
+                 shard_key, count_key, token_key):
+        self.repo_id = repo_id
+        self.split = split
+        self.shard_size = shard_size
+        self.cls_id = cls_id
+        self.progress = progress
+        self.progress_file = progress_file
+        self.shard_key = shard_key
+        self.count_key = count_key
+        self.token_key = token_key
+        self.buffer = deque()        # flat token buffer (carries across docs WITHIN this split)
+        self.shard_seqs = []         # accumulated 512-blocks awaiting upload
 
-    # Keep running until data_chain is empty
-    while True:
-        
-        if (max_examples !=-1) and (progress["num_samples_created"] >= max_examples):
-            break
+    def add(self, toks):
+        self.buffer.extend(toks)
+        # emit full [CLS]+511 blocks; leftover stays in the buffer for the next doc
+        while len(self.buffer) >= LENGTH - 1:
+            block = [self.cls_id]
+            for _ in range(LENGTH - 1):
+                block.append(self.buffer.popleft())
+            self.shard_seqs.append(block)
+            self.progress[self.count_key] += 1
+            if len(self.shard_seqs) >= self.shard_size:
+                self._flush()
 
-        # Take slices of size "length"
-        chunk = list(islice(data_chain, length-1))
+    def pending_tokens(self):
+        return len(self.shard_seqs) * LENGTH
 
-        # If we run out, don't yield shit
-        if (len(chunk) < length-1):
-            break
-        
-        progress["num_samples_created"] += 1
+    def _flush(self):
+        if not self.shard_seqs:
+            return
+        next_shard = self.progress[self.shard_key] + 1
+        filename = f"{self.split}-{next_shard:05d}.parquet"
+        repo_path = f"data/seq_{LENGTH}/{filename}"
+        try:
+            ds = datasets.Dataset.from_dict({"input_ids": self.shard_seqs})
+            ds.to_parquet(filename)
+            api.upload_file(path_or_fileobj=filename, path_in_repo=repo_path,
+                            repo_id=self.repo_id, repo_type="dataset")
+            os.remove(filename)
+            self.progress[self.token_key] += len(self.shard_seqs) * LENGTH
+            self.progress[self.shard_key] = next_shard
+            push_progress_to_hub(self.progress, self.repo_id, self.progress_file)
+            print(f"  {self.split} shard {next_shard:05d} -> {repo_path} ({len(self.shard_seqs)} seqs)")
+            self.shard_seqs = []
+        except Exception as e:
+            raise Exception(f"{self.split} shard {next_shard} failed to upload: {e}")
 
-        # Yield the list with [CLS] "EOS" token
-        yield [tokenizer.cls_token_id] + chunk
+    def finalize(self):
+        # flush remaining FULL blocks (a final small shard); the partial token tail
+        # is intentionally dropped so every row stays exactly 512 long (step 3 requires this).
+        self._flush()
 
-# Generates a Shard 
-def get_shard(packed_stream, shard_size, progress, repo_id, length, api, progress_file, split_name="train"):
-
-    # Shard Data List
-    shard_data = []
-
-    # Use For Loop on Generator from pack_tokens
-    for seq in packed_stream:
-        shard_data.append(seq)
-
-        # When shard reaches maximum size
-        if (len(shard_data) >= shard_size):
-            
-            progress["num_tokens_processed"] += len(shard_data) * length
-
-            if (push_shard_to_hub(shard_data, progress, repo_id, progress_file, length, api, split_name)):
-                return True
-            else:
-                raise Exception("run_sharding_pipeline() done_messed up")
-    
-    # Catch any leftover data if the stream runs out before filling a full shard
-    if len(shard_data) > 0:
-        progress["num_tokens_processed"] += len(shard_data) * length
-        push_shard_to_hub(shard_data, progress, repo_id, progress_file, length, api, split_name)
-                    
-    return False
-            
 
 if __name__ == '__main__':
 
-    # Import Tokenizer
-    tokenizer_path = "answerdotai/ModernBERT-base" 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast = True)
+    tokenizer_path = "answerdotai/ModernBERT-base"
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=True)
+
+    num_seqs_in_shard = int(SHARD_TOKEN_NUM / LENGTH)
+    num_cores = max(1, multiprocessing.cpu_count() - 1)
 
     for source in SOURCES:
-
-        repo_id = f"JamesResearch1216/ModernBERT-512-{source["path"][source["path"].find('/')+1:]}"
-        print(repo_id)
-        
+        short = source["path"][source["path"].find('/') + 1:]
+        repo_id = f"JamesResearch1216/ModernBERT-512-{short}"
+        print(f"\n=== {repo_id} ===")
         api.create_repo(repo_id=repo_id, repo_type="dataset", exist_ok=True)
 
-
-        PROGRESS_FILE = "val_progress.json" if VALIDATION_MODE else "train_progress.json"
-        SPLIT_NAME = "validation" if VALIDATION_MODE else "train"
-
-        # Import Dataset
-        dataset_path = source["path"]
-        dataset_split_path = source["split"]
-        dataset_name_path = source["name"]
-        full_dataset = load_dataset(
-            path = dataset_path, 
-            name = dataset_name_path, 
-            split = dataset_split_path, 
-            streaming = True
-        )
-
-
+        PROGRESS_FILE = "train_progress.json"   # single progress file now (no separate val pass)
         progress = retrieve_progress_from_hub(repo_id, PROGRESS_FILE)
 
-        if VALIDATION_MODE:
+        full_dataset = load_dataset(
+            path=source["path"], name=source["name"], split=source["split"], streaming=True
+        )
 
-            
-            max_examples = source["num_val_rows"]
-            
+        token_cap = source["token_cap"]
 
-            print("Creating Validation Rows")
+        with multiprocessing.Pool(processes=num_cores) as pool:
+            train_writer = ShardWriter(repo_id, "train", num_seqs_in_shard, tokenizer.cls_token_id,
+                                       progress, PROGRESS_FILE,
+                                       "last_train_shard", "num_samples_created", "num_train_tokens")
+            val_writer = ShardWriter(repo_id, "validation", num_seqs_in_shard, tokenizer.cls_token_id,
+                                     progress, PROGRESS_FILE,
+                                     "last_val_shard", "num_val_samples_created", "num_val_tokens")
 
-            num_cores = max(1, multiprocessing.cpu_count()-1)
+            # Resume: skip documents we already consumed. Routing is deterministic per-doc,
+            # so skipped docs already went to their correct split; no double-writes.
+            stream = full_dataset.skip(progress["num_rows_processed"])
+            routed = pool.imap(tokenize_with_split, split_texts(stream, source["col_name"]), chunksize=1000)
 
-            # Apply Multiprocessing
-            with multiprocessing.Pool(processes=num_cores) as pool:
+            for split, toks in routed:
+                progress["num_rows_processed"] += 1
+                if split == "train":
+                    train_writer.add(toks)
+                else:
+                    val_writer.add(toks)
 
-                # Get Token Stream
-                token_stream = parallel_token_stream(full_dataset, pool, progress, 1, source["col_name"] )
+                # Train token cap (counts flushed + in-flight blocks). Overshoots by <=1 shard.
+                if token_cap != -1 and (progress["num_train_tokens"] + train_writer.pending_tokens()) >= token_cap:
+                    print(f"  token cap {token_cap:.2e} reached for {short}")
+                    break
 
-                required_tokens = max_examples * (LENGTH - 1)
+            train_writer.finalize()
+            val_writer.finalize()
+            push_progress_to_hub(progress, repo_id, PROGRESS_FILE)
 
-                flat_chain_list = list(islice(chain.from_iterable(token_stream), required_tokens))
-                
-                # Pass an iterator of our list into pack_tokens
-                packed_stream = pack_tokens(iter(flat_chain_list), tokenizer, progress, max_examples=max_examples, length = LENGTH)
+        print(f"Done {short}: train_blocks={progress['num_samples_created']}, "
+              f"val_blocks={progress['num_val_samples_created']}, "
+              f"train_tokens={progress['num_train_tokens']:,}, val_tokens={progress['num_val_tokens']:,}")
 
-                # Convert to list and push
-                val_data = list(packed_stream) 
-                
-                # Push to Hub
-                push_shard_to_hub(val_data, progress, repo_id, PROGRESS_FILE, length=LENGTH, api=api, data_split=SPLIT_NAME)
-                
-                # Save final progress state
-                push_progress_to_hub(progress, repo_id, PROGRESS_FILE)
-
-            print("Validation Splits Completed")
-
-        else:
-
-            print("Creating Training Split")
-
-            token_cap = source["token_cap"]
-
-            num_sequences_in_shard = int(SHARD_TOKEN_NUM / LENGTH)
-
-            # Calculate number of cores
-            num_cores = max(1, multiprocessing.cpu_count()-1)
-
-            # Apply Multiprocessing
-            with multiprocessing.Pool(processes=num_cores) as pool:
-                
-                # Get how many rows were used by val_progress
-                val_progress = retrieve_progress_from_hub(repo_id, "val_progress.json")
-                rows_to_skip = val_progress["num_rows_processed"] + progress["num_rows_processed"]
-                skipped_dataset = full_dataset.skip(rows_to_skip)   # skip val rows + already-trained rows
-                
-                token_stream = parallel_token_stream(skipped_dataset, pool, progress, chunksize=1000, col_name=source["col_name"])
-                flat_chain = chain.from_iterable(token_stream)
-
-                # Pack the Chain
-                packed_stream = pack_tokens(flat_chain, tokenizer, progress, max_examples = -1, length = LENGTH)
-
-                while token_cap == -1 or progress["num_tokens_processed"] < token_cap:
-
-                    # Process 1 Shard
-                    has_more_data = get_shard(packed_stream, num_sequences_in_shard, progress, repo_id, LENGTH, api, PROGRESS_FILE, SPLIT_NAME)
-
-                    # Save progress to hub
-                    push_progress_to_hub(progress, repo_id, PROGRESS_FILE)
-
-                    if not has_more_data:
-                        print("Dataset stream exhausted")
-                        print("Training Split Completed")
-                        break
-            print(f"Training Data for {source["path"]} completed!")
+    print("\nStep 1 complete.")

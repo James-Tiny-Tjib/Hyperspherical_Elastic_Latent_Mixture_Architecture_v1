@@ -1,228 +1,179 @@
-from transformers import AutoTokenizer
-import datasets
+######################################################
+# Step 2: mix the per-source 512-block repos into ONE combined repo
+# - validation: concatenate every source's validation split (already document-disjoint
+#   from train thanks to step 1's hash routing), shuffle, upload as a SINGLE shard
+#   (validation-00000.parquet) because step 3 packs that one file three ways (1024/2048/4096)
+# - train: pull blocks from each source in proportion to its train block count, shard out
+##################################################
+
 from datasets import load_dataset
-import torch
-from tqdm import tqdm
-import huggingface_hub
-import pyarrow
+import datasets
+import random
 import multiprocessing
 import math
 from itertools import chain, islice
 import json
 import os
-from huggingface_hub import hf_hub_download
-from huggingface_hub import HfApi, HfFileSystem
+from huggingface_hub import hf_hub_download, HfApi
 from huggingface_hub.utils import RepositoryNotFoundError
 
 LENGTH = 512
 SHARD_TOKEN_NUM = 1e8
-NUM_EXAMPLES_PER_SHARD = float(-(-SHARD_TOKEN_NUM // LENGTH)) # Ceiling Trick I learned with AI
-REAL_SHARD_TOKEN_COUNT = float(NUM_EXAMPLES_PER_SHARD * LENGTH)
-COMBINED_REPO_ID = "JamesResearch1216/ModernBERT-512-Combined-v2" # Set your target repo here
-VALIDATION_MODE = True
-# Get HF_TOKEN and WANDB_API_KEY
-def get_secret(key_name):
+NUM_EXAMPLES_PER_SHARD = int(-(-SHARD_TOKEN_NUM // LENGTH))   # ceil
+COMBINED_REPO_ID = "JamesResearch1216/ModernBERT-512-Combined-v4"
+SHUFFLE_SEED = 1216
 
-    # Try Colab
+SOURCE_REPOS = [
+    "JamesResearch1216/ModernBERT-512-pubmed_simple",
+    "JamesResearch1216/ModernBERT-512-arxiv-abstracts-large",
+    "JamesResearch1216/ModernBERT-512-govreport-summarization",
+    "JamesResearch1216/ModernBERT-512-TTCW-Based-Review",
+    "JamesResearch1216/ModernBERT-512-fineweb",
+    "JamesResearch1216/ModernBERT-512-wikihow-cleaned",
+    "JamesResearch1216/ModernBERT-512-simple_wikipedia_LM",
+    "JamesResearch1216/ModernBERT-512-reddit-title-body",
+    "JamesResearch1216/ModernBERT-512-Amazon_Reviews_Binary_for_Sentiment_Analysis",
+    "JamesResearch1216/ModernBERT-512-yelp_review_full",
+    "JamesResearch1216/ModernBERT-512-review_corpus",
+    "JamesResearch1216/ModernBERT-512-TinyStories",
+    "JamesResearch1216/ModernBERT-512-SimpleStories",
+]
+
+
+def get_secret(key_name):
     try:
         from google.colab import userdata
         return userdata.get(key_name)
-    except:
+    except Exception:
         pass
-
-    # Try Kaggle
     try:
         from kaggle_secrets import UserSecretsClient
         return UserSecretsClient().get_secret(key_name)
-    except:
+    except Exception:
         pass
-
-    # Local Env
     return os.getenv(key_name)
 
-def get_progress(repo_id, filename = "train_progress.json"):
+
+def get_progress(repo_id, filename="train_progress.json"):
     try:
-        path = hf_hub_download(repo_id=repo_id, filename = filename, repo_type = "dataset", token=hf_token)
+        path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset", token=hf_token)
         with open(path, "r") as f:
-            progress = json.load(f)
-        return progress
+            return json.load(f)
     except RepositoryNotFoundError:
-        print(f"Repo: \"{repo_id}\" was not found on the Hub (or token is missing). Starting fresh.")
+        print(f"Repo {repo_id} not found. Skipping.")
         return None
     except Exception as e:
-        print(f"No progress file found. Starting fresh. (Notice: {e})")
+        print(f"No progress for {repo_id}. (Notice: {e})")
         return None
 
-# Simplified uploader for the mixed shards
-def push_mixed_shard_to_hub(shard_data, shard_index, repo_id, length, api, split):
-    try:        
+
+def push_shard(shard_data, shard_index, repo_id, length, api, split):
+    try:
         filename = f"{split}-{shard_index:05d}.parquet"
         repo_path = f"data/seq_{length}/{filename}"
-        
-        # Convert to HF dataset
-        # We assume shard_data is a list of dictionaries: [{"input_ids": [...]}, ...]
         ds_shard = datasets.Dataset.from_list(shard_data)
         ds_shard.to_parquet(filename)
-        
-        # Upload
-        api.upload_file(
-            path_or_fileobj=filename,
-            path_in_repo=repo_path,
-            repo_id=repo_id,
-            repo_type="dataset"
-        )
+        api.upload_file(path_or_fileobj=filename, path_in_repo=repo_path,
+                        repo_id=repo_id, repo_type="dataset")
         os.remove(filename)
-        print(f"✅ Mixed Shard {shard_index} uploaded successfully to {repo_path}.")
+        print(f"  {split} shard {shard_index:05d} -> {repo_path} ({len(shard_data)} rows)")
         return True
-    except Exception as e:   
-        print(f"❌ Shard {shard_index} failed to upload: {e}")
+    except Exception as e:
+        print(f"  {split} shard {shard_index} failed: {e}")
         return False
 
-hf_token = get_secret("HF_TOKEN")
-if hf_token is None:
-    print("⚠️ WARNING: HF_TOKEN could not be found! All uploads will fail.")
-api = HfApi(token = hf_token)
 
-dataset_progresses = {
-    "JamesResearch1216/ModernBERT-512-pubmed_simple" : None,
-    "JamesResearch1216/ModernBERT-512-arxiv-abstracts-large" : None,
-    "JamesResearch1216/ModernBERT-512-govreport-summarization" : None,
-    "JamesResearch1216/ModernBERT-512-TTCW-Based-Review" : None,
-    "JamesResearch1216/ModernBERT-512-fineweb" : None,
-    "JamesResearch1216/ModernBERT-512-wikihow-cleaned" : None,
-    "JamesResearch1216/ModernBERT-512-simple_wikipedia_LM" : None,
-    "JamesResearch1216/ModernBERT-512-reddit-title-body" : None,
-    "JamesResearch1216/ModernBERT-512-TinyStories" : None,
-    "JamesResearch1216/ModernBERT-512-SimpleStories" : None,
-}
+def build_validation(api):
+    # Concatenate every source's validation split (each is document-disjoint from train),
+    # shuffle so the single val parquet isn't clustered by source, push as index 0.
+    print("\n=== Building validation split ===")
+    val_rows = []
+    for repo_id in SOURCE_REPOS:
+        try:
+            ds = load_dataset(repo_id, split="validation", streaming=True)
+            n = 0
+            for row in ds:
+                val_rows.append({"input_ids": row["input_ids"]})
+                n += 1
+            print(f"  {repo_id}: +{n} val blocks")
+        except Exception as e:
+            print(f"  {repo_id}: no validation split ({e})")
 
-samples_per_shard = {
-    "JamesResearch1216/ModernBERT-512-pubmed_simple" : 0.0,
-    "JamesResearch1216/ModernBERT-512-arxiv-abstracts-large" : 0.0,
-    "JamesResearch1216/ModernBERT-512-govreport-summarization" : 0.0,
-    "JamesResearch1216/ModernBERT-512-TTCW-Based-Review" : 0.0,
-    "JamesResearch1216/ModernBERT-512-fineweb" : 0.0,
-    "JamesResearch1216/ModernBERT-512-wikihow-cleaned" : 0.0,
-    "JamesResearch1216/ModernBERT-512-simple_wikipedia_LM" : 0.0,
-    "JamesResearch1216/ModernBERT-512-reddit-title-body" : 0.0,
-    "JamesResearch1216/ModernBERT-512-TinyStories" : 0.0,
-    "JamesResearch1216/ModernBERT-512-SimpleStories" : 0.0,
-}
+    if not val_rows:
+        print("  No validation rows found! Did step 1 run with VAL_FRACTION > 0?")
+        return
 
+    random.Random(SHUFFLE_SEED).shuffle(val_rows)
+    push_shard(val_rows, 0, COMBINED_REPO_ID, LENGTH, api, "validation")
+    print(f"  validation total: {len(val_rows)} blocks ({len(val_rows) * LENGTH:,} tokens)")
+
+
+def build_train(api):
+    print("\n=== Building train split ===")
+    # Read each source's TRAIN block count (num_samples_created) to compute mixing ratios.
+    counts = {}
+    total = 0
+    for repo_id in SOURCE_REPOS:
+        prog = get_progress(repo_id)
+        if prog is not None:
+            c = prog.get("num_samples_created", 0)
+            counts[repo_id] = c
+            total += c
+        else:
+            counts[repo_id] = 0
+            print(f"  {repo_id} has no progress (treated as 0)")
+
+    if total == 0:
+        print("  No train blocks found. Aborting train build.")
+        return
+
+    per_shard = {}
+    actual = 0
+    for repo_id, c in counts.items():
+        ratio = c / total
+        per_shard[repo_id] = int(ratio * NUM_EXAMPLES_PER_SHARD)
+        actual += per_shard[repo_id]
+        print(f"  {repo_id}: ratio {ratio:.4f} -> {per_shard[repo_id]} blocks/shard")
+    print(f"  target/shard {NUM_EXAMPLES_PER_SHARD}, actual/shard {actual}, "
+          f"total train tokens {total * LENGTH:,}")
+
+    iters = {}
+    for repo_id, c in per_shard.items():
+        if c > 0:
+            iters[repo_id] = iter(load_dataset(repo_id, split="train", streaming=True))
+
+    shard_index = 0
+    exhausted = False
+    while not exhausted:
+        mixed = []
+        for repo_id, c in per_shard.items():
+            if c == 0:
+                continue
+            chunk = list(islice(iters[repo_id], c))
+            mixed.extend({"input_ids": r["input_ids"]} for r in chunk)
+            if len(chunk) < c:
+                print(f"  {repo_id} ran dry.")
+                exhausted = True
+        if not mixed:
+            break
+        # shuffle within the shard so step 3's consecutive-block packing isn't source-ordered
+        random.Random(SHUFFLE_SEED + shard_index).shuffle(mixed)
+        if not push_shard(mixed, shard_index, COMBINED_REPO_ID, LENGTH, api, "train"):
+            print("  Halting (upload failure).")
+            break
+        shard_index += 1
+
+    print(f"  train shards written: {shard_index}")
 
 
 if __name__ == '__main__':
-
+    hf_token = get_secret("HF_TOKEN")
+    if hf_token is None:
+        print("WARNING: HF_TOKEN could not be found! All uploads will fail.")
+    api = HfApi(token=hf_token)
     api.create_repo(repo_id=COMBINED_REPO_ID, repo_type="dataset", exist_ok=True)
 
-    if (VALIDATION_MODE):
-        
-        validation_data = []
+    build_validation(api)   # one pass: build the held-out val shard first
+    build_train(api)        # then mix the train shards
 
-        for path in dataset_progresses.keys():
-
-            print(f"Loading val. split for {path}...")
-            dataset = load_dataset(path, split = "validation", streaming = True)
-            for row in dataset:
-                validation_data.append(row)
-
-
-
-        success = push_mixed_shard_to_hub(
-            shard_data=validation_data, 
-            shard_index=0, 
-            repo_id=COMBINED_REPO_ID, 
-            length=LENGTH, 
-            api=api,
-            split = "validation"
-        )
-        
-        if not success:
-            print("Halting pipeline due to upload failure.")
-
-
-
-    else:
-
-        total_samples = 0
-
-        for dataset in dataset_progresses.keys():
-            dataset_progresses[dataset] = get_progress(dataset)
-            if dataset_progresses[dataset] is not None:
-                dataset_num_samples = dataset_progresses[dataset]["num_samples_created"]
-                total_samples += dataset_num_samples
-                samples_per_shard[dataset] = dataset_num_samples
-            else:
-                print(f"{dataset} is kinda cooked (REELY BAD)")
-        
-        actual_shard_total = 0
-
-        for dataset, ds_samples in samples_per_shard.items():
-            ratio = ds_samples / total_samples
-            print(f"{dataset} Ratio: {ratio}")
-            samples_per_shard[dataset] = int(ratio * NUM_EXAMPLES_PER_SHARD)
-            actual_shard_total += samples_per_shard[dataset]    
-        
-        print(f"\nTarget examples per shard: {int(NUM_EXAMPLES_PER_SHARD)}")
-        print(f"Actual examples per shard: {actual_shard_total}")
-        print(f"Total tokens across all source datasets: {total_samples * LENGTH}\n")
-
-        # 3. Initialize streaming iterators for all active datasets
-        print("Initializing dataset streams...")
-        dataset_iters = {}
-        for dataset, count in samples_per_shard.items():
-            if count > 0:
-                # Load the tokenized repos we created in step 1
-                stream = load_dataset(dataset, split="train", streaming=True)
-                dataset_iters[dataset] = iter(stream)
-
-        # 4. Pack, Shuffle, and Upload Loop
-        shard_index = 0
-        data_exhausted = False
-
-        while not data_exhausted:
-            mixed_shard_data = []
-
-            # Pull exact required counts from each dataset
-            for dataset, count in samples_per_shard.items():
-                if count == 0:
-                    continue
-                    
-                # islice acts exactly like .take(count) but for Python iterators
-                chunk = list(islice(dataset_iters[dataset], count))
-                mixed_shard_data.extend(chunk)
-
-                # If a stream runs dry before we reach the requested count, we are out of data
-                if len(chunk) < count:
-                    print(f"Dataset {dataset} has run out of data!")
-                    data_exhausted = True
-
-            if len(mixed_shard_data) == 0:
-                break # Completely empty, we are done
-
-            # Upload the shard
-            success = push_mixed_shard_to_hub(
-                shard_data=mixed_shard_data, 
-                shard_index=shard_index, 
-                repo_id=COMBINED_REPO_ID, 
-                length=LENGTH, 
-                api=api,
-                split = "train"
-            )
-            
-            if not success:
-                print("Halting pipeline due to upload failure.")
-                break
-
-            shard_index += 1
-
-        print("\n🎉 Mixed pipeline completed!")
-
-
-
-
-
-
-
-
-
+    print("\nStep 2 complete.")

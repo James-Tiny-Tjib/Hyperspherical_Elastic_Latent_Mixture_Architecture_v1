@@ -331,6 +331,12 @@ Created this log to help me document what is happening
         Therefore, 
         AUX uses a cv^2 (constant * variance ^ 2) head-number invariant 
 
+6/17:
+    Pushed to 1.5 Billion tokens
+    Currently sitting at 3.2 loss
+    Validation is now 0 (need investigation)
+    
+
 
 
 

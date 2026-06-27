@@ -274,7 +274,7 @@ class MLMDataStrategy:
 
         # Fix indices for validation due to my weird validation parquet naming
         # the plus 1 because 1 indexed
-        index = index if is_train else (curriculum_level)
+        index = index if is_train else 0
 
         # Get parquet file path
         parquet_file_path = f"data/{self.config.curriculum_subset_names[curriculum_level]}/{dataset_type}-{index:05d}.parquet"
@@ -2020,7 +2020,7 @@ if __name__ == "__main__":
 
     # Update: Sidecar respawn. Insteaf spawning one time, create respawning thread
 
-    # Create holder so watchdog can swap the sidecar
+    # Create holder so watchdog can swap the sidecar (mutable)
     sidecar_holder = {"proc": None}
 
     def spawn_sidecar():
