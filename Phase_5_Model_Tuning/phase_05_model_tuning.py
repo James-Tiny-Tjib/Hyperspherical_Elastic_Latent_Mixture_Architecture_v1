@@ -104,13 +104,13 @@ class HardwareConfig:
             "ws": 8, "target": 128, "dtype": torch.bfloat16,"use_scaler": False,
             0: {"mb": 8, "use_ckpt": False, "sl": 1024},
             1: {"mb": 2, "use_ckpt": False, "sl": 2048},
-            2: {"mb": 1, "use_ckpt": False, "sl": 4096},
+            2: {"mb": 1, "use_ckpt": True, "sl": 4096},
         },
         "v5e-1": {
             "ws": 1, "target": 128, "dtype": torch.bfloat16,"use_scaler": False,
             0: {"mb": 8, "use_ckpt": False, "sl": 1024},
             1: {"mb": 2, "use_ckpt": False, "sl": 2048},
-            2: {"mb": 1, "use_ckpt": False, "sl": 4096},
+            2: {"mb": 1, "use_ckpt": True, "sl": 4096},
         },
         "v6e-1": {
             "ws": 1, "target": 128, "dtype": torch.bfloat16,"use_scaler": False,
@@ -168,7 +168,7 @@ class HardwareConfig:
         }
     }
 
-    hardware_string: str = "v5e-1 tpu"
+    hardware_string: str = "v5e-8 tpu"
     # hardware_string: str = "t4*2 gpu"
     hf_token: str = ""
 
@@ -222,10 +222,10 @@ class MLMDataConfig:
 
 @dataclass
 class CheckpointConfig:
-    model_repo_id: str = "JamesResearch1216/v1-Architecture-phase05v0-test"
+    model_repo_id: str = "JamesResearch1216/v1-Architecture-phase05v1"
     wandb_entity: str = "jhui16-university-of-maryland"
     wandb_project: str = "HELM-v1-10B-Run"
-    wandb_name: str = "phase05v0-test"
+    wandb_name: str = "phase05v1"
     hf_token: str = ""
     wandb_key: str = ""
     use_wandb: bool = True
@@ -262,13 +262,13 @@ class MLMDataStrategy:
     # - # of total rows in the shard
     # Load the ith parquet into runtime
     def download_parquet(self, is_train: bool, index = 0):
-        
+
         # Finding Correct curriculum
         curriculum_level = 0
         for level in range(0, len(self.config.curriculum_parquet_start_index)):
             if (index >= self.config.curriculum_parquet_start_index[level]):
                 curriculum_level = level
-        
+
         # Set up dataset types
         dataset_type = "train" if is_train else "validation"
 
@@ -281,7 +281,7 @@ class MLMDataStrategy:
 
         local_storage_dir = "./local_parquet_shards"
         os.makedirs(local_storage_dir, exist_ok=True)
-        
+
         # Form file path that potientially is already in file_path
         local_path = os.path.join(local_storage_dir, parquet_file_path)
         if os.path.exists(local_path):
@@ -313,7 +313,7 @@ class MLMDataStrategy:
         except Exception as e:
             print(f"Failed to download {parquet_file_path}: {e}")
             return "", 0, 0
-            
+
     # Delete Parquet
     def delete_parquet(self, parquet_file_path: str):
         try:
@@ -331,18 +331,18 @@ class MLMDataStrategy:
     # Create get_mlm_data_loader function
     # Note: This only bascially works with the dataset created by prepare_data.py
     def get_mlm_data_loader(
-        self, 
-        parquet_file_path: str, 
-        collate_fn = None, 
-        skip_rows = 0, 
-        batch_size = 1, 
-        parquet_index = 1, 
+        self,
+        parquet_file_path: str,
+        collate_fn = None,
+        skip_rows = 0,
+        batch_size = 1,
+        parquet_index = 1,
         is_train = True,
         ):
 
         # Get HF Dataset obj from parquet
         dataset = Dataset.from_parquet(path_or_paths = parquet_file_path, keep_in_memory = True)
-        
+
         # Shuffle after you shard
         # Make sure you set a seed to ensure the I don't use the same data again
         # + index to keep this more random but predictable for reproductibility
@@ -355,7 +355,7 @@ class MLMDataStrategy:
             if skip_rows >= len(dataset):
                 dataset = dataset.select(range(0))   # empty
             # Else skip skip_rows and grab remaining data
-            else:  
+            else:
                 dataset = dataset.select(range(skip_rows, len(dataset)))
 
         # If we're Parallel Processing, Shard the Data so that each device gets a different slice of data
@@ -487,7 +487,7 @@ class CheckpointDriver:
             import torch.distributed as dist
             if dist.is_initialized():
                 dist.barrier()
-    
+
     # Get the number of rows
     def _get_total_rows(self):
         from huggingface_hub import HfFileSystem
@@ -516,7 +516,7 @@ class CheckpointDriver:
                 parquet_files = fs.glob(f"datasets/{repo_id}/{pattern}")
 
                 for file_path in parquet_files:
-                    
+
                     # binary read mode to get metadata
                     with fs.open(file_path, "rb") as f:
                         # Get metadata
@@ -526,7 +526,7 @@ class CheckpointDriver:
 
                         total_rows_dict[str(level)] += num_rows
                         total_rows_dict["all"] += num_rows
-            
+
             except Exception as e:
                 if self.rank == 0:
                     print(f"💀 Error reading metadata for {subset_name}: {e}")
@@ -535,7 +535,7 @@ class CheckpointDriver:
             for k, v in total_rows_dict.items():
                 label = "ALL" if k == "all" else self.data_config.curriculum_subset_names[int(k)]
                 print(f"  📊 {label}: {v:,} rows")
-        
+
         return total_rows_dict
 
     def _compute_easiness_breakpoints(self, column="easiness_score", n_breakpoints=101, max_files=5):
@@ -554,7 +554,7 @@ class CheckpointDriver:
         for level, subset_name in enumerate(self.data_config.curriculum_subset_names):
 
             try:
-                
+
                 # Take all the file_paths for the parquets used to calculate the break-points easiness distribution
                 pattern = self.data_config.glob_pattern.format(
                     subset_name = subset_name,
@@ -628,7 +628,7 @@ class CheckpointDriver:
                 global_concat, n_breakpoints, column
             )
             if self.rank == 0:
-                g = easiness_dict 
+                g = easiness_dict
                 print(f"  🌍 Global easiness: n={g['n']:,} median={g['median']:.3f} "
                     f"mean={g['mean']:.3f} frac>0.5={g['frac_above_0.5']:.2f}")
         else:
@@ -637,7 +637,7 @@ class CheckpointDriver:
             easiness_dict = None
 
         return easiness_dict
-    
+
     @staticmethod
     def _compute_breakpoint_payload(values, n_breakpoints, column):
         """Helper: given a numpy array of easiness values, return the breakpoint dict."""
@@ -724,9 +724,9 @@ class CheckpointDriver:
             try:
                 # Try Downlaoding
                 path = hf_hub_download(
-                    repo_id=self.ckpt_config.model_repo_id, 
-                    filename = filename, 
-                    repo_type = "model", 
+                    repo_id=self.ckpt_config.model_repo_id,
+                    filename = filename,
+                    repo_type = "model",
                     token = self.ckpt_config.hf_token
                 )
 
@@ -908,8 +908,8 @@ class CheckpointDriver:
             # Load the optmizer
             if optimizer and 'optimizer_state' in ckpt:
                 optimizer.load_state_dict(ckpt['optimizer_state'])
-            
-            # Get 
+
+            # Get
             scheduler_state = ckpt.get('scheduler_state', None)
 
             # print success
@@ -922,7 +922,7 @@ class CheckpointDriver:
             # Sync up
             if self.world_size > 1:
                 self._smart_barrier("model_optimizer_loaded")
-            
+
             # Let rank = 0 delete the last checkpoint to resume
             if self.rank == 0:
                 try:
@@ -938,17 +938,17 @@ class CheckpointDriver:
 
     # Saves the model to a .pt file
     # Makes checkpoint entry for training_state
-    def save_checkpoint(self, 
-                        model, 
+    def save_checkpoint(self,
+                        model,
                         optimizer,
-                        scheduler, 
-                        global_step: int, 
-                        hardware_string: str, 
-                        metrics: dict, 
-                        is_tpu: bool, 
-                        curriculum_level: int, 
-                        total_tokens_processed_global: int, 
-                        total_rows_processed_global: int, 
+                        scheduler,
+                        global_step: int,
+                        hardware_string: str,
+                        metrics: dict,
+                        is_tpu: bool,
+                        curriculum_level: int,
+                        total_tokens_processed_global: int,
+                        total_rows_processed_global: int,
                         rows_processed_at_curr_level: int,
                         parquet_index: int,
                         total_rows_processed_parquet: int,
@@ -1035,7 +1035,7 @@ class CheckpointDriver:
 def get_curr_scheduler(optimizer, total_curr_level_steps, curr_max_lr, curr_min_lr, base_lr, warmup_steps = 0):
 
     # When given a lr_lambda function, the function multiplies this value by the base_lr
-    # We want the real curr_max_lr / curr_min_lr, but we must divide before to cancel the multiplication 
+    # We want the real curr_max_lr / curr_min_lr, but we must divide before to cancel the multiplication
     max_mult = curr_max_lr / base_lr
     min_mult = curr_min_lr / base_lr
 
@@ -1043,7 +1043,7 @@ def get_curr_scheduler(optimizer, total_curr_level_steps, curr_max_lr, curr_min_
         # Warmup (only for first phase)
         if current_step < warmup_steps:
             return min_mult + (max_mult - min_mult) * (current_step / max(1, warmup_steps))
-        
+
         # progress is a number between 0-1
         progress = (current_step - warmup_steps) / max (1, total_curr_level_steps - warmup_steps)
 
@@ -1052,10 +1052,10 @@ def get_curr_scheduler(optimizer, total_curr_level_steps, curr_max_lr, curr_min_
 
         # prog(0) = max_mult, prog(1) = min_mult
         return min_mult + 0.5 * (max_mult - min_mult) * (1 + math.cos(math.pi * progress))
-    
+
     return LambdaLR(optimizer, lr_lambda)
 
-   
+
 
 # Driver to Log Telemtry to WandB
 class TelemetryDriver:
@@ -1063,12 +1063,12 @@ class TelemetryDriver:
     # Initialize Hardware
     def __init__(self, rank, run_id, model_config, ckpt_config: CheckpointConfig, resume_step = 0):
 
-        # Get Rank 
+        # Get Rank
         self.rank = rank
 
-        # Get Checkpoint 
+        # Get Checkpoint
         self.ckpt_config = ckpt_config
-        
+
         # Get modeL_config
         self.model_config = model_config
 
@@ -1132,7 +1132,7 @@ class TelemetryDriver:
                 "train/aux_loss": aux_loss,
                 "train/sparsity_loss": sparsity_loss,
                 "train/total_loss": total_loss
-            }   
+            }
         else:
             log_payload = {
                 "validation/ce_loss": ce_loss,
@@ -1140,7 +1140,7 @@ class TelemetryDriver:
                 "validation/sparsity_loss": sparsity_loss,
                 "validation/total_loss": total_loss
             }
-        
+
         router_heatmap_data = []
         sigmoid_heatmap_data = []
 
@@ -1153,11 +1153,11 @@ class TelemetryDriver:
             log_payload[f"layer_{i}/mlp_alpha_hist"] = wandb.Histogram(telemetry_dict[f"layer_{i}_mlp_alpha_hist"].numpy())
             log_payload[f"layer_{i}/suv_hist"] = wandb.Histogram(telemetry_dict[f"layer_{i}_suv_hist"].numpy())
             log_payload[f"layer_{i}/sigmoid_scores_hist"] = wandb.Histogram(telemetry_dict[f"layer_{i}_sigmoid_scores"].numpy())
-            
+
             # Attention SQK
             log_payload[f"layer_{i}/sqk_mean"] = telemetry_dict[f"layer_{i}_sqk_mean"]
             log_payload[f"layer_{i}/sqk_std"] = telemetry_dict[f"layer_{i}_sqk_std"]
-            
+
             # Attention Alpha Eigen Learning Rate
             log_payload[f"layer_{i}/attn_alpha_mean"] = telemetry_dict[f"layer_{i}_attn_alpha_mean"]
             log_payload[f"layer_{i}/attn_alpha_std"] = telemetry_dict[f"layer_{i}_attn_alpha_std"]
@@ -1177,18 +1177,18 @@ class TelemetryDriver:
             router_heatmap_data.append(flat_mask)
 
             # Average the sigmoid_scores across the batch
-            # [b, num_attention_heads, 1, 1] -> [num_attention_heads]   
+            # [b, num_attention_heads, 1, 1] -> [num_attention_heads]
             sigmoid_scores = telemetry_dict[f"layer_{i}_sigmoid_scores"].mean(dim=0).squeeze().numpy()
             sigmoid_heatmap_data.append(sigmoid_scores)
-        
+
         # LM_head
         log_payload["lm_head/sz_mean"] = telemetry_dict["lm_head_sz_mean"]
         log_payload["lm_head/sz_std"] = telemetry_dict["lm_head_sz_std"]
 
         log_payload["lm_head/sz_hist"] = wandb.Histogram(telemetry_dict["lm_head_sz_hist"].numpy())
-        
+
         # Generate the 2D Router Heatmap
-        heatmap_matrix = np.stack(router_heatmap_data) 
+        heatmap_matrix = np.stack(router_heatmap_data)
         fig, ax = plt.subplots(figsize=(10, 8))
         cax = ax.matshow(heatmap_matrix, cmap="cool", vmin=0.0, vmax=1.0)
         fig.colorbar(cax, label="Activation Frequency")
@@ -1201,7 +1201,7 @@ class TelemetryDriver:
         plt.close(fig)
 
         # Generate the 2D Sigmoid Score Heatmap
-        sig_matrix = np.stack(sigmoid_heatmap_data) 
+        sig_matrix = np.stack(sigmoid_heatmap_data)
         fig2, ax2 = plt.subplots(figsize=(10, 8))
         cax2 = ax2.matshow(sig_matrix, cmap="winter", vmin=0.0, vmax=1.0) # Different colormap to distinguish
         fig2.colorbar(cax2, label="Mean Sigmoid Confidence")
@@ -1209,7 +1209,7 @@ class TelemetryDriver:
         ax2.set_ylabel("Layer")
         ax2.set_title(f"Router Sigmoid Confidence Heatmap (Step {global_step})")
         ax2.set_yticks(range(self.model_config.num_hidden_layers))
-        
+
         log_payload["router/confidence_heatmap"] = wandb.Image(fig2)
         plt.close(fig2)
 
@@ -1218,8 +1218,8 @@ class TelemetryDriver:
 
         # Push to W&B
         wandb.log(log_payload, step=global_step)
-        
- 
+
+
 
 # Function that all devices will run (ran from the launch function right above)
 def train_worker(rank, hw_config, data_config, ckpt_config):
@@ -1229,7 +1229,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
     # This sits outside the training loop so we can detect whether the training loop is hanging
     import threading
 
-    # Start Daemon Thread to write 
+    # Start Daemon Thread to write
     heartbeat_stop = threading.Event()
 
     # Fucntion to write the time
@@ -1244,7 +1244,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                     f.write(str(time.time()))
             except Exception:
                 pass # Ensure training doesn't crash because of this john
-    
+
     # Start the thread
     heartbeat_thread = threading.Thread(target=heartbeat_report, daemon = True)
     heartbeat_thread.start()
@@ -1266,7 +1266,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
     import sys
     import traceback
     import os # Add os
-    
+
     if hw_config.hf_token:
         os.environ["HF_TOKEN"] = hw_config.hf_token
 
@@ -1333,14 +1333,14 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
         # Define Checkpoint Driver
         checkpoint_driver = CheckpointDriver(
-            hw_config = hw_config, data_config = data_config, ckpt_config = ckpt_config, 
+            hw_config = hw_config, data_config = data_config, ckpt_config = ckpt_config,
             rank = rank, world_size = hw_config.world_size
         )
 
         # Pull the easiness_dict from the training_state (even though there should be a local copy, it may have not been populated)
         easiness_dict = checkpoint_driver.training_state["easiness_dict"]
         easiness_brkpts = easiness_dict["breakpoints"]
-        
+
         # Get the total steps of the data
         num_rows_dict = checkpoint_driver.training_state["total_rows_dict"]
         dataset_total_steps = num_rows_dict["all"] // hw_config.target_gbs
@@ -1354,7 +1354,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             aux_anneal_start = int(0.08 *  dataset_total_steps),
             aux_anneal_steps = int(0.25 * dataset_total_steps),
             easiness_cdf_breakpoints = easiness_brkpts
-            
+
         )
 
         # Create model and attach to device
@@ -1375,6 +1375,20 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
         # Define CE Loss
         loss_fct = nn.CrossEntropyLoss()
+        loss_fct_sum = nn.CrossEntropyLoss(reduction="sum")  # ignore_index defaults to -100
+        def chunked_ce(logits, labels, vocab_size, n_chunks=8):
+            flat_logits = logits.reshape(-1, vocab_size)
+            flat_labels = labels.reshape(-1)
+            total = flat_logits.size(0)
+            chunk = (total + n_chunks - 1) // n_chunks
+            valid = (flat_labels != loss_fct.ignore_index).sum().clamp_min(1)
+            loss_sum = flat_logits.new_zeros(())
+            for i in range(0, total, chunk):
+                loss_sum = loss_sum + loss_fct_sum(
+                    flat_logits[i:i + chunk].float(),
+                    flat_labels[i:i + chunk],
+                )
+            return loss_sum / valid
 
         # Set data type that will be used
         dtype = hw_config.dtype
@@ -1415,8 +1429,8 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
         # Initialize TelemetryDriver
         telemetry_driver = TelemetryDriver(
             rank = rank,
-            run_id = run_id, 
-            ckpt_config = ckpt_config, 
+            run_id = run_id,
+            ckpt_config = ckpt_config,
             model_config = helm_config,
             resume_step = actual_resume_step
         )
@@ -1426,7 +1440,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
         for level in range(start_curr_level,len(data_config.curriculum_subset_names)):
 
             total_curr_level_steps = checkpoint_driver.training_state["total_rows_dict"][str(level)] // hw_config.target_gbs
-            
+
             # Reset optimizer's internal LR (each curr_level turns it -> min_lr, so reset is required)
             if not (scheduler_state is not None and level == start_curr_level):
                 for param_group in optimizer.param_groups:
@@ -1448,7 +1462,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                     optimizer, total_curr_level_steps, helm_config.base_lr * 0.18,
                     helm_config.min_lr, helm_config.base_lr, 0
                 )
-            
+
             # If resuming, overwrite the scheduler's internal state
             # (restores step counter so cosine decay continues from where it left off)
             if scheduler_state is not None and level == start_curr_level:
@@ -1485,7 +1499,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             collator = SpanMLMCollatorWithEasiness.SpanMLMCollatorWithEasiness(
                 config = data_config, tokenizer = tokenizer
             )
-            
+
             validation_file_path = ""
             if rank == 0:
                 # Load Validation parquet for current curriculum level
@@ -1503,12 +1517,12 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
             # Define validation_dataloader
             validation_loader = data_strat.get_mlm_data_loader(
                 parquet_file_path = validation_file_path,
-                collate_fn = collator, 
-                batch_size = hw_config.batch_size, 
-                parquet_index = parquet_index, 
+                collate_fn = collator,
+                batch_size = hw_config.batch_size,
+                parquet_index = parquet_index,
                 is_train = False,
             )
-            
+
             # var holding a new train_file_path so it can be preloaded without training hiccups
             # This shouldn't affect the curriculum level, I'm just storing it for consistency
             new_train_file_path = ""
@@ -1530,7 +1544,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                     train_file_path = ""
                     if rank == 0:
                         train_file_path, train_parquet_num_rows, parquet_curr_level = data_strat.download_parquet(is_train = True, index = parquet_index)
-                    
+
                     if hw_config.world_size > 1:
                         _smart_barrier("start_download_training")
 
@@ -1554,15 +1568,15 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                     parquet_file_path = train_file_path,
                     collate_fn = collator,
                     skip_rows =  total_rows_processed_parquet,
-                    batch_size = hw_config.batch_size, 
-                    parquet_index = parquet_index, 
+                    batch_size = hw_config.batch_size,
+                    parquet_index = parquet_index,
                     is_train = True,
                 )
-                
+
                 # if TPU is being used, apply the ParallelLoader().per_device_loader()
                 if is_tpu:
                     train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
-            
+
                 # ========== TRAINING LOOP ==========
                 # Loop through each batch
                 for step, batch in enumerate(train_loader):
@@ -1587,20 +1601,23 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                             logits, aux_loss, sparsity_loss = model(input_ids=input_ids, attention_mask=attention_mask, easiness_score = easiness_score, current_step=global_step)
                             # logits: [mb, seq_len, vocab_size] -> [mb*seq_len, vocab_size]
                             # labels: [mb, seq_len] -> [mb*seq_len]
-                            ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
+                            ce_loss = chunked_ce(logits, labels, helm_config.vocab_size)
                             total_loss = (ce_loss + aux_loss + sparsity_loss) / hw_config.grad_accum_steps
                     else:
                         with torch.autocast(device_type="xla", dtype=torch.bfloat16):
                             logits, aux_loss, sparsity_loss = model(input_ids=input_ids, attention_mask=attention_mask, easiness_score = easiness_score, current_step=global_step)
                             # logits: [mb, seq_len, vocab_size] -> [mb*seq_len, vocab_size]
                             # labels: [mb, seq_len] -> [mb*seq_len]
-                            ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
+                            ce_loss = chunked_ce(logits, labels, helm_config.vocab_size)
                             total_loss = (ce_loss + aux_loss + sparsity_loss) / hw_config.grad_accum_steps
 
                     if scaler is not None:
                         scaler.scale(total_loss).backward()
                     else:
                         total_loss.backward()
+                    # Mark every micro batch to prevent accumulating the entire graph
+                    if is_tpu:
+                        xm.mark_step()
 
                     # Once Gradient has been accumulated, step the model and the optimizer
                     if (step + 1) % hw_config.grad_accum_steps == 0:
@@ -1625,7 +1642,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                             scaler.update()
                         else:
                             optimizer.step()
-                        
+
                         scheduler.step()
 
                         # Normalize the model's weights
@@ -1634,7 +1651,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                         # Zero the gradient
                         optimizer.zero_grad()
                         global_step += 1
-                        
+
 
                         # Calculating the values for the save_checkpoint
                         # Should just be the target gbs, but just in case
@@ -1648,7 +1665,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                         # Maybe make this asynchronous ???
                         if (((float) (total_rows_processed_parquet) / train_parquet_num_rows) >= .95) and new_train_file_path == "":
                             new_train_file_path, new_train_parquet_num_rows, new_parquet_curr_level = data_strat.download_parquet(is_train = True, index = parquet_index + 1)
-    
+
 
                         rows_processed_at_curr_level +=  rows_this_step
                         total_rows_processed_global += rows_this_step
@@ -1658,17 +1675,17 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
                         # Log Data to Wandb
                         if global_step < 100 or global_step % 10 == 0:
-                                
+
                             # Save telemetry_dict
                             telemetry_dict = unwrapped_model.get_telemetry()
 
                             telemetry_driver.log_step(
-                                telemetry_dict = telemetry_dict, 
-                                ce_loss = to_float(ce_loss), 
+                                telemetry_dict = telemetry_dict,
+                                ce_loss = to_float(ce_loss),
                                 aux_loss = to_float(aux_loss),
-                                sparsity_loss = to_float(sparsity_loss), 
-                                total_loss = report_total_loss, 
-                                global_step = global_step, 
+                                sparsity_loss = to_float(sparsity_loss),
+                                total_loss = report_total_loss,
+                                global_step = global_step,
                                 is_train = True,
                                 global_tokens_processed = total_tokens_processed_global
                             )
@@ -1706,13 +1723,13 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                                 rows_processed_at_curr_level = rows_processed_at_curr_level,
                                 parquet_index = parquet_index,
                                 total_rows_processed_parquet = total_rows_processed_parquet,
-                                run_id = run_id, 
+                                run_id = run_id,
                             )
 
                         # ========== VALIDATION LOOP ==========
                         # Log Valdiation every 500 steps
                         if global_step % (500 if not TESTING_MODE else 50) == 0:
-                            
+
                             if rank == 0:
                                 print("⏳ Calculating Validation...")
 
@@ -1730,7 +1747,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
                             # Loop through the validation_loader
                             for step, batch in enumerate(validation_loader):
-                                
+
                                 if step > hw_config.validation_step_num:
                                     break
 
@@ -1745,11 +1762,11 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                                     if hw_config.device_type == "cuda":
                                         with torch.autocast(device_type="cuda", dtype=dtype):
                                             logits, aux_loss, sparsity_loss = model(input_ids=input_ids, attention_mask=attention_mask)
-                                            ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
+                                            ce_loss = chunked_ce(logits, labels, helm_config.vocab_size)
                                             val_loss = ce_loss + aux_loss + sparsity_loss
                                     else:
                                         logits, aux_loss, sparsity_loss = model(input_ids=input_ids, attention_mask=attention_mask)
-                                        ce_loss = loss_fct(logits.view(-1, helm_config.vocab_size), labels.view(-1))
+                                        ce_loss = chunked_ce(logits, labels, helm_config.vocab_size)
                                         val_loss = ce_loss + aux_loss + sparsity_loss
 
                                 # Add Loss Values
@@ -1778,25 +1795,25 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
                                 # Log the Data to WandB
                                 telemetry_driver.log_step(
-                                    telemetry_dict = telemetry_dict, 
-                                    ce_loss = avg_ce_loss, 
-                                    aux_loss = avg_aux_loss, 
-                                    sparsity_loss = avg_sparsity_loss, 
-                                    total_loss = avg_val_loss, 
-                                    global_step = global_step, 
+                                    telemetry_dict = telemetry_dict,
+                                    ce_loss = avg_ce_loss,
+                                    aux_loss = avg_aux_loss,
+                                    sparsity_loss = avg_sparsity_loss,
+                                    total_loss = avg_val_loss,
+                                    global_step = global_step,
                                     is_train = False
                                 )
 
                                 if rank == 0:
                                     print(f"Total Loss: {avg_val_loss:.4f} | CE: {avg_ce_loss:.4f} | Aux: {avg_aux_loss:.4f} | Sparsity: {avg_sparsity_loss:.4f}")
-                            
+
                             # Call model.train
                             model.train()
-                
+
                 # break out of parquet loop
                 if os.path.exists(SHUTDOWN_FILE):
                     break
-                    
+
                 if rank == 0:
                     print(f"📦 Finished parquet {parquet_index} (level {level}). Advancing.")
 
@@ -1806,7 +1823,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
                 # Advance to the next parquet and reset within-parquet row counter
                 parquet_index += 1
                 total_rows_processed_parquet = 0
-            
+
             # Delete valdiation parquet once the curriculum is over
             data_strat.delete_parquet(validation_file_path)
 
@@ -1823,7 +1840,7 @@ def train_worker(rank, hw_config, data_config, ckpt_config):
 
     except Exception as e:
         print(f"\n❌ FATAL WORKER ERROR ON RANK {rank}:")
-        traceback.print_exc()        
+        traceback.print_exc()
         return
 
 
@@ -2013,14 +2030,14 @@ if __name__ == "__main__":
         print("wandb disabled. Change use_wandb in the CheckpointConfig to True if you intended to log")
     else:
         print("⚠️ wandb_key was NULL. Make sure you allow secrets on Colab or Kaggle. Continuing Anonymous Logging")
-        
+
 
     # Use the 'spawn' context to prevent C++ state corruption
     ctx = multiprocessing.get_context('spawn')
 
     # Update: Sidecar respawn. Insteaf spawning one time, create respawning thread
 
-    # Create holder so watchdog can swap the sidecar (mutable)
+    # Create holder so watchdog can swap the sidecar
     sidecar_holder = {"proc": None}
 
     def spawn_sidecar():
@@ -2032,7 +2049,7 @@ if __name__ == "__main__":
         )
         uploader_process.start()
         return uploader_process
-    
+
     sidecar_holder["proc"] = spawn_sidecar()
 
     # Watchdog worker function to respawn sidecar
@@ -2055,7 +2072,7 @@ if __name__ == "__main__":
                 exitcode = proc.exitcode
                 print(f"⚠️ Sidecar died (exitcode={exitcode}, crash #{crash_count}). Respawning...")
                 sidecar_holder["proc"] = spawn_sidecar()
-    
+
     # Create Watchdog
     sidecar_watchdog_thread = threading.Thread(target=sidecar_watchdog, daemon = True)
     sidecar_watchdog_thread.start()
@@ -2084,12 +2101,12 @@ if __name__ == "__main__":
                 elif age <= STALE_WARN and r in warned:
                     print(f"✅ WATCHDOG: Rank {r} recovered.")
                     warned.discard(r)
-    
+
     # Start trainer watchdog for all threads
     training_watchdog_thread = threading.Thread(target=training_watchdog, daemon=True)
     training_watchdog_thread.start()
- 
-        
+
+
     # Prepare Hardware Driver
     driver = HardwareDriver(HW_CFG, DATA_CFG, CKPT_CFG)
 
