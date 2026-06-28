@@ -103,13 +103,13 @@ class HardwareConfig:
         "v5e-8": {
             "ws": 8, "target": 128, "dtype": torch.bfloat16,"use_scaler": False,
             0: {"mb": 8, "use_ckpt": False, "sl": 1024},
-            1: {"mb": 4, "use_ckpt": False, "sl": 2048},
+            1: {"mb": 2, "use_ckpt": False, "sl": 2048},
             2: {"mb": 1, "use_ckpt": False, "sl": 4096},
         },
         "v5e-1": {
             "ws": 1, "target": 128, "dtype": torch.bfloat16,"use_scaler": False,
             0: {"mb": 8, "use_ckpt": False, "sl": 1024},
-            1: {"mb": 4, "use_ckpt": False, "sl": 2048},
+            1: {"mb": 2, "use_ckpt": False, "sl": 2048},
             2: {"mb": 1, "use_ckpt": False, "sl": 4096},
         },
         "v6e-1": {
@@ -195,7 +195,7 @@ class HardwareConfig:
 
 @dataclass
 class MLMDataConfig:
-    data_repo_id: str = "JamesResearch1216/HELM-Easiness-Data-10B-Labeled-v3"
+    data_repo_id: str = "JamesResearch1216/HELM-Easiness-Data-10B-Labeled-v6"
     curriculum: bool = True
     curriculum_subset_names: List[str] = field(
         default_factory=lambda: ["seq_1024", "seq_2048", "seq_4096"]
@@ -274,7 +274,7 @@ class MLMDataStrategy:
 
         # Fix indices for validation due to my weird validation parquet naming
         # the plus 1 because 1 indexed
-        index = index if is_train else 0
+        index = index if is_train else curriculum_level
 
         # Get parquet file path
         parquet_file_path = f"data/{self.config.curriculum_subset_names[curriculum_level]}/{dataset_type}-{index:05d}.parquet"
