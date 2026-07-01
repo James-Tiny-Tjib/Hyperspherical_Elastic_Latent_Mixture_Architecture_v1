@@ -274,7 +274,7 @@ class MLMDataStrategy:
 
         # Fix indices for validation due to my weird validation parquet naming
         # the plus 1 because 1 indexed
-        index = index if is_train else curriculum_level
+        index = index if is_train else 0 # curriculum_level
 
         # Get parquet file path
         parquet_file_path = f"data/{self.config.curriculum_subset_names[curriculum_level]}/{dataset_type}-{index:05d}.parquet"

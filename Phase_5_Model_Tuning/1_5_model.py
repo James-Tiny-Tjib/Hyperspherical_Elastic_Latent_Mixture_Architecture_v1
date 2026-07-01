@@ -1067,7 +1067,7 @@ class HELMModel(nn.Module):
                     attention_mask,
                     step_tensor,
                     easiness_score,
-                    use_reentrant= True if hidden_states.device.type == "xla" else False
+                    use_reentrant=True if hidden_states.device.type == "xla" else False
                 )
             # Or Standard Forward Pass
             else:
