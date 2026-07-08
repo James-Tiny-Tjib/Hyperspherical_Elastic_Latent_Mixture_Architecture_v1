@@ -1,5 +1,3 @@
-%%writefile model.py
-
 ##################################################
 # Defines the HELM V1 architecture
 # Inherited the PretrainedConfig and PreTrainedModel
@@ -595,10 +593,18 @@ class HELMSelfAttention(nn.Module):
     #   backend="gather": compact gather/scatter SDPA, no torch.compile needed.
     #   backend="dense" : compute-all-then-mask (default; what training uses).
     def set_eval_backend(self, backend="flex", compile=True):
+        compile = bool(compile)
+        # Only drop the cached torch.compile()'d function/block-mask builder when the
+        # backend or compile flag actually changes -- resetting on every call (even when
+        # nothing changed) forces a full recompilation on the very next forward pass,
+        # which is silently expensive if this is called before every timed benchmark run.
+        changed = (backend != getattr(self, "_eval_backend", None)
+                   or compile != getattr(self, "_flex_compiled", None))
         self._eval_backend = backend
-        self._flex_compiled = bool(compile)
-        self._flex_fn = None
-        self._block_mask_fn = None
+        self._flex_compiled = compile
+        if changed:
+            self._flex_fn = None
+            self._block_mask_fn = None
 
     def _flex_attn(self, q, k, v, block_mask, scale):
         if self._flex_fn is None:
@@ -744,7 +750,7 @@ class HELMSelfAttention(nn.Module):
 
             # Apply flex attention
             context_layer = self._flex_attn(
-                q, k, v, blok_mask = block_mask, scale = math.sqrt(self.d_head)
+                q, k, v, block_mask = block_mask, scale = math.sqrt(self.d_head)
             )
 
             # Add Exclusive Attention (better results?)
@@ -756,6 +762,10 @@ class HELMSelfAttention(nn.Module):
             # [batch, num attention heads, seq_len, head dim] (router_mask [batch, num_attention_heads, 1,1] was broadcasted)
             context_layer = context_layer * router_mask.expand_as(context_layer)
 
+            # Reshape
+            # size(): [b, seq_len, num_attention_heads, d_head]
+            context_reshaped = context_layer.permute(0, 2, 1, 3).contiguous()
+
             # Flatten the last two dimensions:
             # size(): [b, seq_len, num_hidden_size]
             context_reshaped = context_reshaped.view(batch_size, seq_len, -1)
@@ -766,22 +776,22 @@ class HELMSelfAttention(nn.Module):
         # Single query effieincy
         else:
 
+            # This path only looks at batch element 0's router decisions (see below), so
+            # it is only correct for batch_size == 1 -- each example's active heads are
+            # data-dependent, so silently reusing example 0's mask for other examples
+            # would produce wrong outputs for them instead of a loud failure.
+            assert batch_size == 1, (
+                f"HELMSelfAttention's 'gather' eval backend only supports batch_size == 1 "
+                f"(got batch_size={batch_size}); use backend='flex' for batched inference."
+            )
+
             # Find the heads that are on
             # nonzero(): [1, num_attention_heads, 1, 1] -> [num_active_heads, 1]
             # squeeze(): [num_active_heads, 1] -> [num_active_heads] (indices)
             active_indices = torch.nonzero(router_mask[0, :, 0, 0]).squeeze(-1)
 
-            # Reshape q,k,v
-            # q, k, v size(): [b, seq_len, num_attention_heads, hidden_size]
-            q = q.view(batch_size, seq_len, self.num_attention_heads, self.d_head)
-            k = k.view(batch_size, seq_len, self.num_attention_heads, self.d_head)
-            v = v.view(batch_size, seq_len, self.num_attention_heads, self.d_head)
-
-            # Reshape q,k,v
-            # q, k, v size(): [b, num_attention_heads, seq_len, hidden_size]
-            q = q.permute(0,2,1,3)
-            k = k.permute(0,2,1,3)
-            v = v.permute(0,2,1,3)
+            # q, k, v are already [b, num_attention_heads, seq_len, d_head] from the
+            # shared reshape/permute above -- no need to reshape them again here.
 
             # 2. Extract the parts used by the active heads
             # size(): [1, num_attention_heads, seq_len, d_head] ->  [1, num_active_heads, seq_len, d_head]
@@ -836,10 +846,11 @@ class HELMSelfAttention(nn.Module):
 
             # 7. Slice the input columns of the output weight matrix
             # original shape [hidden_size, hidden_size] -> [hidden_size, num_active * d_head]
-            sliced_weight = self.output.weight[:, active_dims]
+            sliced_weight = self.output.weight[:, active_dims].to(context_reshaped.dtype)
+            sliced_bias = None if self.output.bias is None else self.output.bias.to(context_reshaped.dtype)
 
             # 8. Perform the compressed functional linear projection
-            context_layer = F.linear(context_reshaped, sliced_weight, bias=self.output.bias)
+            context_layer = F.linear(context_reshaped, sliced_weight, bias=sliced_bias)
 
         # Return context_layer (normalization occurs in HELMMLP)
         return context_layer
