@@ -1,8 +1,9 @@
-# %%writefile model.py
+%%writefile model.py
 
 ##################################################
 # Defines the HELM V1 architecture
-# Removes all NGPT components and replaces with 
+# Inherited the PretrainedConfig and PreTrainedModel
+# This version does not include exclusive attention
 ##################################################
 
 import os
@@ -61,7 +62,7 @@ class HELMConfig(PretrainedConfig):
         swiglu_s_init = 1.0,
         base_lr = 3e-4,
         min_lr = 3e-5,
-        weight_decay = 0.1,
+        weight_decay = 0.0,
         bias = False,
         use_ckpt = False,
 
@@ -102,12 +103,12 @@ class HELMConfig(PretrainedConfig):
         aux_coeff_start = 0.02,
         aux_coeff_floor = 0.002,
         aux_anneal_start = 0.08,
-        aux_anneal_steps = 0.08,
+        aux_anneal_steps = 0.25,
 
         # ngpt self attention and ffn hyperparameters
         ngpt_sqk_init_value = 1.0,
         ngpt_sqk_init_scale = 0.03125,
-        use_exclusive_attention = True,
+        use_exclusive_attention = False,
         ngpt_alpha_value_attn = 0.05,
         ngpt_alpha_scale_attn = 0.03125,
         ngpt_alpha_value_mlp = 0.05,
@@ -116,7 +117,7 @@ class HELMConfig(PretrainedConfig):
         ngpt_suv_scale = 1.0,
         ngpt_sz_init_value = 1.00,
         ngpt_sz_init_scale = 0.03125,
-
+        
         # Passing total step count for warm up step calculations:
         dataset_total_steps = 65000,
 
@@ -178,7 +179,6 @@ class HELMConfig(PretrainedConfig):
         self.aux_anneal_start = int(aux_anneal_start * dataset_total_steps) 
         self.aux_anneal_steps = int(aux_anneal_steps * dataset_total_steps) 
 
-
         # ngpt self attention and ffn hyperparameters
         self.ngpt_sqk_init_value = ngpt_sqk_init_value
         self.ngpt_sqk_init_scale = ngpt_sqk_init_scale
@@ -213,11 +213,14 @@ class HELMEmbedding(nn.Module):
     # Forward Pass (yes, its literally 3 lines)
     def forward(self, input_ids):
 
-        # Map input_ids from Word Embeddings (standard: raw learned embeddings, no unit-norm)
+        # Map input_ids from Word Embeddings
         word_embeds = self.word_embeddings(input_ids)
 
+        # Normalize (an nGPT must to allow cos. sim. to work)
+        embeddings = justnorm(word_embeds)
+
         # Return
-        return word_embeds
+        return embeddings
 
 
 
@@ -318,7 +321,7 @@ class HELMMultiViewRouter(nn.Module):
         # Multiply the hidden_state by Down projection (q_down_proj)
         # Call it "scanner"
         # Size: [b, s, hidden_size] * [hidden_size * num_router_latents] = [b, s, num_router_latents]
-        scanner = F.linear(justnorm(hidden_states), q_down_proj)
+        scanner = F.linear(hidden_states, q_down_proj)
 
         # Apply Softmax to entire sequences (sequence level routing)
         scanner_softmax = F.softmax(scale * scanner, dim = 1)
@@ -331,7 +334,7 @@ class HELMMultiViewRouter(nn.Module):
         # Size: [b,num_router_latents,s] * [b, s, hidden_size] = [b, num_router_latents, hidden_size]
         # Use bmm (batch matrix matric product) b/c [b, n_r_l, s] * [b, s, h_s] (dims don't match up normally)
         # Could've transposed, but this is more memory efficient
-        latents = torch.bmm(scanner_softmax, justnorm(hidden_states))
+        latents = torch.bmm(scanner_softmax, hidden_states)
 
         # Scale latents by Learnable important parameters (l_i_weights)
         # Softmax them first
@@ -581,7 +584,8 @@ class HELMSelfAttention(nn.Module):
             config.rope_theta
         )
 
-        # (standard) no sqk: q/k are used as projected, scaled by the usual 1/sqrt(d_head)
+        # SQK scalers right after RoPE
+        self.sqk = nn.Parameter(self.ngpt_sqk_init_scale*torch.ones(self.hidden_size))
 
         # Output Matrix
         self.output = nn.Linear(
@@ -595,10 +599,18 @@ class HELMSelfAttention(nn.Module):
     #   backend="gather": compact gather/scatter SDPA, no torch.compile needed.
     #   backend="dense" : compute-all-then-mask (default; what training uses).
     def set_eval_backend(self, backend="flex", compile=True):
+        compile = bool(compile)
+        # Only drop the cached torch.compile()'d function/block-mask builder when the
+        # backend or compile flag actually changes -- resetting on every call (even when
+        # nothing changed) forces a full recompilation on the very next forward pass,
+        # which is silently expensive if this is called before every timed benchmark run.
+        changed = (backend != getattr(self, "_eval_backend", None)
+                   or compile != getattr(self, "_flex_compiled", None))
         self._eval_backend = backend
-        self._flex_compiled = bool(compile)
-        self._flex_fn = None
-        self._block_mask_fn = None
+        self._flex_compiled = compile
+        if changed:
+            self._flex_fn = None
+            self._block_mask_fn = None
 
     def _flex_attn(self, q, k, v, block_mask, scale):
         if self._flex_fn is None:
@@ -627,8 +639,13 @@ class HELMSelfAttention(nn.Module):
         # q, k, v size(): [b, seq_len, hidden_size]
         q, k, v = qkv_proj.split(hidden_size, dim=-1)
 
-        # (standard) plain scaled-dot-product scale, 1/sqrt(d_head)
-        attn_scale = 1.0 / math.sqrt(self.d_head)
+        # Define sqk for scaling q, k, and v
+        # size(): [hidden_size]
+        sqk = (self.sqk * (self.ngpt_sqk_init_value/self.ngpt_sqk_init_scale))
+        # Resizing is required for when we element-wise multiply this by q and k matrice:s [1, num_attention_heads, 1, d_head] * [b, num_attention_heads, seq_len, hidden_size]
+        # size(): [hidden_size]-> [1, num_attention_heads, 1, d_head]
+        sqk = sqk.view(1, self.num_attention_heads, 1, self.d_head)
+
 
         eval_backend = self._eval_backend
 
@@ -648,16 +665,25 @@ class HELMSelfAttention(nn.Module):
         # TRAINING / TPU MODE
         if (self.training or eval_backend == "dense"):
 
-            # (standard) RoPE on q,k; no unit-norm, no sqk
+            # Normalize q and k
+            q = justnorm(q)
+            k = justnorm(k)
+
+            # Apply RoPE
             q = self.RoPE(q)
             k = self.RoPE(k)
 
-            # Apply Attention (standard 1/sqrt(d_head) scale)
-            # final size(): [b, num_attention_heads, seq_len, d_head]
+            # Apply sqk scaling factor to q and k
+            q = sqk.to(q.dtype) * q
+            k = sqk.to(k.dtype) * k
+
+            # Apply Attention
+            # Scale by sqrt(dk)
+            # A whole lot happens here. final size(): [b, num_attention_heads, seq_len, d_head]
             context_layer = F.scaled_dot_product_attention(
                 q, k, v,
                 attn_mask=attention_mask.to(q.dtype),
-                scale=attn_scale,
+                scale=math.sqrt(self.d_head),
             )
 
             # Add Exclusive Attention (better results?)
@@ -699,9 +725,17 @@ class HELMSelfAttention(nn.Module):
         # FLEX ATTENTION (for GPUs)
         elif eval_backend == "flex" and batch_size > 1:
 
-            # (standard) RoPE on q,k; no unit-norm, no sqk
+             # Normalize q and k
+            q = justnorm(q)
+            k = justnorm(k)
+
+            # Apply RoPE
             q = self.RoPE(q)
             k = self.RoPE(k)
+
+            # Apply sqk scaling factor to q and k
+            q = sqk.to(q.dtype) * q
+            k = sqk.to(k.dtype) * k
 
             # Router_mask scores, 1 or 0 or sigmoid scaling
             # [b, num_attention_heads, 1 , 1] -> [batch, num_attention_heads]
@@ -722,7 +756,7 @@ class HELMSelfAttention(nn.Module):
 
             # Apply flex attention
             context_layer = self._flex_attn(
-                q, k, v, block_mask = block_mask, scale = attn_scale
+                q, k, v, block_mask = block_mask, scale = math.sqrt(self.d_head)
             )
 
             # Add Exclusive Attention (better results?)
@@ -734,6 +768,10 @@ class HELMSelfAttention(nn.Module):
             # [batch, num attention heads, seq_len, head dim] (router_mask [batch, num_attention_heads, 1,1] was broadcasted)
             context_layer = context_layer * router_mask.expand_as(context_layer)
 
+            # Reshape
+            # size(): [b, seq_len, num_attention_heads, d_head]
+            context_reshaped = context_layer.permute(0, 2, 1, 3).contiguous()
+
             # Flatten the last two dimensions:
             # size(): [b, seq_len, num_hidden_size]
             context_reshaped = context_reshaped.view(batch_size, seq_len, -1)
@@ -744,22 +782,22 @@ class HELMSelfAttention(nn.Module):
         # Single query effieincy
         else:
 
+            # This path only looks at batch element 0's router decisions (see below), so
+            # it is only correct for batch_size == 1 -- each example's active heads are
+            # data-dependent, so silently reusing example 0's mask for other examples
+            # would produce wrong outputs for them instead of a loud failure.
+            assert batch_size == 1, (
+                f"HELMSelfAttention's 'gather' eval backend only supports batch_size == 1 "
+                f"(got batch_size={batch_size}); use backend='flex' for batched inference."
+            )
+
             # Find the heads that are on
             # nonzero(): [1, num_attention_heads, 1, 1] -> [num_active_heads, 1]
             # squeeze(): [num_active_heads, 1] -> [num_active_heads] (indices)
             active_indices = torch.nonzero(router_mask[0, :, 0, 0]).squeeze(-1)
 
-            # Reshape q,k,v
-            # q, k, v size(): [b, seq_len, num_attention_heads, hidden_size]
-            q = q.view(batch_size, seq_len, self.num_attention_heads, self.d_head)
-            k = k.view(batch_size, seq_len, self.num_attention_heads, self.d_head)
-            v = v.view(batch_size, seq_len, self.num_attention_heads, self.d_head)
-
-            # Reshape q,k,v
-            # q, k, v size(): [b, num_attention_heads, seq_len, hidden_size]
-            q = q.permute(0,2,1,3)
-            k = k.permute(0,2,1,3)
-            v = v.permute(0,2,1,3)
+            # q, k, v are already [b, num_attention_heads, seq_len, d_head] from the
+            # shared reshape/permute above -- no need to reshape them again here.
 
             # 2. Extract the parts used by the active heads
             # size(): [1, num_attention_heads, seq_len, d_head] ->  [1, num_active_heads, seq_len, d_head]
@@ -767,16 +805,25 @@ class HELMSelfAttention(nn.Module):
             k_sliced = k[:, active_indices, :, :]
             v_sliced = v[:, active_indices, :, :]
 
-            # (standard) RoPE on q,k; no unit-norm, no sqk
+            # Normalize q and k
+            q_sliced = justnorm(q_sliced)
+            k_sliced = justnorm(k_sliced)
+
+            # Apply RoPE
             q_sliced = self.RoPE(q_sliced)
             k_sliced = self.RoPE(k_sliced)
+
+            # Apply sqk scaling factor to q and k
+            sqk_sliced = sqk[:, active_indices, :, :]
+            q_sliced = sqk_sliced.to(q_sliced.dtype) * q_sliced
+            k_sliced = sqk_sliced.to(k_sliced.dtype) * k_sliced
 
             # Flash Attention (only for GPUs where on-the-fly splicing can exist)
             # size(): [b, num_active_heads, seq_len, d_head]
             context_sliced = F.scaled_dot_product_attention(
                 q_sliced, k_sliced, v_sliced,
                 attn_mask=attention_mask.to(q.dtype),
-                scale=attn_scale
+                scale=math.sqrt(self.d_head)
             )
 
             # Add Exclusive Attention (better results?)
@@ -805,36 +852,148 @@ class HELMSelfAttention(nn.Module):
 
             # 7. Slice the input columns of the output weight matrix
             # original shape [hidden_size, hidden_size] -> [hidden_size, num_active * d_head]
-            sliced_weight = self.output.weight[:, active_dims]
+            sliced_weight = self.output.weight[:, active_dims].to(context_reshaped.dtype)
+            sliced_bias = None if self.output.bias is None else self.output.bias.to(context_reshaped.dtype)
 
             # 8. Perform the compressed functional linear projection
-            context_layer = F.linear(context_reshaped, sliced_weight, bias=self.output.bias)
+            context_layer = F.linear(context_reshaped, sliced_weight, bias=sliced_bias)
 
         # Return context_layer (normalization occurs in HELMMLP)
         return context_layer
 
 
 
-# HELMMLP - standard SwiGLU feed-forward network.
-# Pre-LN + additive residual are handled by HELMBlock; this module is a pure FFN.
+# HELMMLP (FFN of nGPT architecture)
+# All of this stays the same from the original nGPT paper
 class HELMMLP(nn.Module):
 
+    # Define the Following:
+    #   - Constants from config (for convience?)
+    #       * hidden_size
+    #       * ngpt_alpha_value_attn
+    #       * ngpt_alpha_scale_attn
+    #       * ngpt_alpha_value_mlp
+    #       * ngpt_alpha_scale_mlp
+    #       * ngpt_suv_value
+    #       * ngpt_suv_scale
+    #   - Eigen learning rate after attention (attn_alpha)
+    #   - Eigen learning rate after mlp (mlp_alpha)
+    #   - MLP expansion layer (mlp_exp)
+    #   - suv scaling vectors for SwiGLU (suv)
+    #   - SiLU() activation (silu)
+    #   - MLP projection layer (mlp_expand)
     def __init__(self, config):
         super().__init__()
+
+        # Gather Config Values for convience
         self.hidden_size = config.hidden_size
+        self.ngpt_alpha_value_attn = config.ngpt_alpha_value_attn
+        self.ngpt_alpha_scale_attn = config.ngpt_alpha_scale_attn
+        self.ngpt_alpha_value_mlp = config.ngpt_alpha_value_mlp
+        self.ngpt_alpha_scale_mlp = config.ngpt_alpha_scale_mlp
+        self.ngpt_suv_value = config.ngpt_suv_value
+        self.ngpt_suv_scale = config.ngpt_suv_scale
         self.intermediate_size = config.intermediate_size
 
-        # SwiGLU: expand to 2*intermediate (gate + value), then project back down
-        self.mlp_exp = nn.Linear(self.hidden_size, 2 * self.intermediate_size, bias=config.bias)
-        self.silu = nn.SiLU()
-        self.mlp_proj = nn.Linear(self.intermediate_size, self.hidden_size, bias=config.bias)
+        # Alpha Eigen Update after Attention (1st Optimizer Step)
+        self.attn_alpha = torch.nn.Parameter(self.ngpt_alpha_scale_attn*torch.ones(self.hidden_size))
 
-    def forward(self, x):
-        # x is already LayerNorm'd by the block (Pre-LN). Returns FFN output (no residual).
-        uv = cast_linear(x, self.mlp_exp)              # [b, s, 2*intermediate]
-        u, v = torch.chunk(uv, 2, dim=-1)              # each [b, s, intermediate]
-        x_mlp = u * self.silu(v)                        # SwiGLU
-        return cast_linear(x_mlp, self.mlp_proj)        # [b, s, hidden]
+        # Alpha Eigen Update after MLP (2nd Optimizer Step)
+        self.mlp_alpha = torch.nn.Parameter(self.ngpt_alpha_scale_mlp*torch.ones(self.hidden_size))
+
+        # MLP expansion layer
+        self.mlp_exp = nn.Linear(
+            self.hidden_size,
+            2 * self.intermediate_size,
+            bias = config.bias
+        )
+
+        # suv scaling vectors during SwiGLU
+        self.suv = torch.nn.Parameter(self.ngpt_suv_scale*torch.ones(2 * self.intermediate_size))
+
+        # Define SiLU()
+        self.silu = nn.SiLU()
+
+        # MLP projection layer (shrink)
+        self.mlp_proj  = nn.Linear(
+            self.intermediate_size,
+            self.hidden_size,
+            bias=config.bias
+        )
+
+    # Peform MLP from the output of the output matrix to the end of the transformer block
+    def forward(self, hidden_states, hidden_states_attention):
+
+        # Even more convience
+        hidden_size = self.hidden_size
+        ngpt_alpha_value_attn = self.ngpt_alpha_value_attn
+        ngpt_alpha_scale_attn = self.ngpt_alpha_scale_attn
+        ngpt_alpha_value_mlp = self.ngpt_alpha_value_mlp
+        ngpt_alpha_scale_mlp = self.ngpt_alpha_scale_mlp
+        ngpt_suv_value = self.ngpt_suv_value
+        ngpt_suv_scale = self.ngpt_suv_scale
+
+        # Mostly Lifted from the nGPT model.py
+
+        # Apply Normalization to hidden states before and after attention
+        # both size(): [b, seq_len, hidden_size]
+        A_norm = justnorm(hidden_states)
+        B_norm = justnorm(hidden_states_attention)
+
+        # Define the eigen learning rate
+        # alpha >=0
+        # size(): [hidden_size]
+        lr = self.attn_alpha * (ngpt_alpha_value_attn / ngpt_alpha_scale_attn)
+        lr = torch.abs(lr).to(A_norm.dtype)
+
+        # h = Norm(h + alpha_a * (h_a - h)) (element-wise)
+        # size(): [b, seq_len, hidden_size]
+        hidden_states_opt1 = A_norm + lr * (B_norm - A_norm)
+        hidden_states_opt1 = justnorm(hidden_states_opt1)
+
+        # Get u and v matrices by multiplying by mlp_exp
+        # size(): [b, seq_len, hidden_size] * [hidden_size, 2 * intermediate_size] = [b, seq_len, 2 * intermediate_size]
+        uv_pre = cast_linear(hidden_states_opt1 ,self.mlp_exp)
+        # prepare scaling vector suv
+        # size(): [intermediate_size * 2] (remember, they are concatenated)
+        suv = self.suv * (ngpt_suv_value/ngpt_suv_scale) * (hidden_size ** 0.5)
+        # We need to keep suv to be bf16. The line above promoted suc fp32 and the autocaster didn't fix it
+        suv = suv.to(uv_pre.dtype)
+
+        # element-wise uv by scaling vector suv
+        # size(): [b, seq_len, 2 * intermediate_size]
+        uv_post_suv = suv * uv_pre
+
+        # Chunk uv into u and v
+        # both size(): [b, seq_len, intermediate_size]
+        u, v = torch.chunk(uv_post_suv, 2, dim=-1)
+
+        # Apply u * silu(v), the whole point of SwiGLU (element-wise)
+        # size(): [b, seq_len, intermediate_size]
+        x_mlp = u * self.silu(v)
+
+        # Project x_mlp to the mlp_proj layer (shrink)
+        # size(): [b, seq_len, intermediate_size] * [intermediate_size, hidden_size] = [b, seq_len, hidden_size]
+        h_mlp = cast_linear(x_mlp, self.mlp_proj)
+
+        # Apply Normalization to hidden states after attention and after mlp
+        # both size(): [b, seq_len, hidden_size]
+        A_norm = justnorm(hidden_states_opt1)
+        B_norm = justnorm(h_mlp)
+
+        # Define the eigen learning rate
+        # alpha >=0
+        # size(): [hidden_size]
+        lr = self.mlp_alpha * (ngpt_alpha_value_mlp / ngpt_alpha_scale_mlp)
+        lr = torch.abs(lr).to(A_norm.dtype)
+
+        # h = Norm(h + alpha_m * (h_a - h)) (element-wise)
+        # size(): [b, seq_len, hidden_size]
+        hidden_states_opt2 = A_norm + lr * (B_norm - A_norm)
+        hidden_states_opt2 = justnorm(hidden_states_opt2)
+
+        # Return new hidden_state
+        return hidden_states_opt2
 
 
 
@@ -851,26 +1010,15 @@ class HELMBlock(nn.Module):
         self.mlt_vw_rtr = HELMMultiViewRouter(config)
         self.attn = HELMSelfAttention(config)
         self.mlp = HELMMLP(config)
-        # (standard) Pre-LN: one norm before attention, one before the FFN
-        self.ln1 = nn.LayerNorm(config.hidden_size, eps=config.norm_eps, bias=config.bias)
-        self.ln2 = nn.LayerNorm(config.hidden_size, eps=config.norm_eps, bias=config.bias)
 
-    # Standard Pre-LN transformer block with additive residuals.
-    # The router still reads the RAW block input (unchanged from the nGPT version),
-    # so its behaviour/telemetry is identical; only the backbone math changes.
+    # # Define the forward pass
     def forward(self, hidden_states, attention_mask, step_tensor, easiness_score = None):
         router_mask = self.mlt_vw_rtr(hidden_states, step_tensor, easiness_score)
         aux_loss = self.mlt_vw_rtr.aux_loss
         sparsity_loss = self.mlt_vw_rtr.sparsity_loss
-
-        # attention sublayer: h = h + Attn(LN1(h))
-        attn_output = self.attn(self.ln1(hidden_states), attention_mask, router_mask)
-        hidden_states = hidden_states + attn_output
-
-        # feed-forward sublayer: h = h + FFN(LN2(h))
-        hidden_states = hidden_states + self.mlp(self.ln2(hidden_states))
-
-        return hidden_states, aux_loss, sparsity_loss
+        attn_output = self.attn(hidden_states, attention_mask, router_mask)
+        layer_output = self.mlp(hidden_states, attn_output)
+        return layer_output, aux_loss, sparsity_loss
 
 
 
@@ -893,9 +1041,6 @@ class HELMModel(nn.Module):
         self.blocks = nn.ModuleList(
             [HELMBlock(config) for _ in range(config.num_hidden_layers)]
         )
-
-        # (standard) final norm before the LM head (Pre-LN stacks need this)
-        self.final_norm = nn.LayerNorm(config.hidden_size, eps=config.norm_eps, bias=config.bias)
 
 
     # Forward Pass
@@ -939,7 +1084,7 @@ class HELMModel(nn.Module):
                     attention_mask,
                     step_tensor,
                     easiness_score,
-                    use_reentrant= True if hidden_states.device.type == "xla" else False
+                    use_reentrant=True if hidden_states.device.type == "xla" else False
                 )
             # Or Standard Forward Pass
             else:
@@ -947,9 +1092,6 @@ class HELMModel(nn.Module):
 
             total_aux_loss += aux_loss
             total_sparsity_loss += sparsity_loss
-
-        # (standard) final norm
-        hidden_states = self.final_norm(hidden_states)
 
         # Return hidden state (feature extraction / context location prediction) & special losses
         # hidden_states: [b, seq_len, hidden_size]
@@ -970,15 +1112,22 @@ class HELMForMaskedLM(PreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
 
+        # Define from Config
+        self.ngpt_sz_init_value = config.ngpt_sz_init_value
+        self.ngpt_sz_init_scale = config.ngpt_sz_init_scale
+
         # Define the Model
         self.model = HELMModel(config)
 
-        # Define the head Layer (standard: plain linear, no nGPT sz scaling)
+        # Define the head Layer
         self.classifier = nn.Linear(
             config.hidden_size,
             config.vocab_size,
             bias = config.bias
         )
+
+        # Define the head layer scaling vetor
+        self.sz = nn.Parameter(torch.ones(config.vocab_size))
 
         # HF Function to call _init_weights() function
         self.post_init()
@@ -1007,10 +1156,27 @@ class HELMForMaskedLM(PreTrainedModel):
             block.attn.set_eval_backend(backend=backend, compile=compile)
         return self
 
-    # Standard backbone does NOT renormalize weights each step (that was an nGPT requirement).
-    # Kept as a no-op so the trainer's per-step call is harmless and needs no change.
+    # Define Function to normalize_ngpt_matrices
     def normalize_ngpt_matrices(self):
-        return
+
+        # Define all the projection matrices to normalize
+        keys_to_normalize = (
+            "word_embeddings.weight",
+            "classifier.weight",
+            "attn.qkv.weight",
+            "attn.output.weight",
+            "mlp.mlp_exp.weight",
+            "mlp.mlp_proj.weight",
+            "mlt_vw_rtr.q_down_proj.weight"
+        )
+
+        # Normalize every one of those mats along their dim = 1 (embedding)
+        # The model's weights are transposed (for backprop) so instead of dim = 0, we do dim = 1
+        with torch.no_grad():
+            for name, param in self.named_parameters():
+                if name.endswith(keys_to_normalize):
+                    # EDIT: Instead of complete data-reassignment (danger-danger!!!), use in_place copying
+                    param.copy_(justnorm(param, dim = 1, eps = 1e-12))
 
     # Get all necessary telemetrics & return as dict
     @torch.no_grad()
@@ -1054,31 +1220,48 @@ class HELMForMaskedLM(PreTrainedModel):
             # ============================
 
 
-            # ---------- PRE-LN GAINS (standard-backbone health signals) ----------
+            # ---------- SELF ATTENTION ----------
 
-            # ln1 gain (pre-attention LayerNorm weight)
-            ln1_tensor = block.ln1.weight.detach().cpu()
-            telemetry[f"layer_{i}_ln1_gain_mean"] = ln1_tensor.mean().item()
-            telemetry[f"layer_{i}_ln1_gain_std"] = ln1_tensor.std().item()
-            telemetry[f"layer_{i}_ln1_gain_hist"] = ln1_tensor
+            # sqk vector ([hidden_size] scaling vector in attn, element wise mult.)
+            sqk_tensor = block.attn.sqk.detach().cpu()
+            telemetry[f"layer_{i}_sqk_mean"] = sqk_tensor.mean().item()
+            telemetry[f"layer_{i}_sqk_std"] = sqk_tensor.std().item()
+            telemetry[f"layer_{i}_sqk_hist"] = sqk_tensor
 
-            # ln2 gain (pre-FFN LayerNorm weight)
-            ln2_tensor = block.ln2.weight.detach().cpu()
-            telemetry[f"layer_{i}_ln2_gain_mean"] = ln2_tensor.mean().item()
-            telemetry[f"layer_{i}_ln2_gain_std"] = ln2_tensor.std().item()
-            telemetry[f"layer_{i}_ln2_gain_hist"] = ln2_tensor
-
-            # attention output-projection weight scale (Frobenius norm; watch for residual blow-up)
-            telemetry[f"layer_{i}_attn_out_wnorm"] = block.attn.output.weight.detach().float().norm().item()
-
-            # ------------------------------------------------------------
+            # ------------------------------------
 
 
-        # final norm gain before the LM head
-        fn_tensor = self.model.final_norm.weight.detach().cpu()
-        telemetry["final_norm_gain_mean"] = fn_tensor.mean().item()
-        telemetry["final_norm_gain_std"] = fn_tensor.std().item()
-        telemetry["final_norm_gain_hist"] = fn_tensor
+            # @@@@@@@@@@ MLP @@@@@@@@@@
+
+            # Get MLP block
+            mlp = block.mlp
+
+            # attn_alpha (post attention eigen learning rates)
+            attn_alpha_tensor = mlp.attn_alpha.detach().cpu()
+            telemetry[f"layer_{i}_attn_alpha_mean"] = attn_alpha_tensor.mean().item()
+            telemetry[f"layer_{i}_attn_alpha_std"] = attn_alpha_tensor.std().item()
+            telemetry[f"layer_{i}_attn_alpha_hist"] = attn_alpha_tensor
+
+            # mlp_alpha (post mlp eigen learning rates)
+            mlp_alpha_tensor = mlp.mlp_alpha.detach().cpu()
+            telemetry[f"layer_{i}_mlp_alpha_mean"] = mlp_alpha_tensor.mean().item()
+            telemetry[f"layer_{i}_mlp_alpha_std"] = mlp_alpha_tensor.std().item()
+            telemetry[f"layer_{i}_mlp_alpha_hist"] = mlp_alpha_tensor
+
+            # suv scaling vector ([intermediate_size * 2] scaling vector in u and v, element wise mult.)
+            suv_tensor = mlp.suv.detach().cpu()
+            telemetry[f"layer_{i}_suv_mean"] = suv_tensor.mean().item()
+            telemetry[f"layer_{i}_suv_std"] = suv_tensor.std().item()
+            telemetry[f"layer_{i}_suv_hist"] = suv_tensor
+
+            # @@@@@@@@@@@@@@@@@@@@@@@@@
+
+
+        # sz_tensor ([intermediate_size * 2] scaling vector in u and v, element wise mult.)
+        sz_tensor = self.sz.detach().cpu()
+        telemetry["lm_head_sz_mean"] = sz_tensor.mean().item()
+        telemetry["lm_head_sz_std"] = sz_tensor.std().item()
+        telemetry["lm_head_sz_hist"] = sz_tensor
 
         return telemetry
 
@@ -1091,9 +1274,15 @@ class HELMForMaskedLM(PreTrainedModel):
         # features: [b, seq_len, hidden_size]
         features, total_aux_loss, total_sparsity_loss = self.model(input_ids, attention_mask, current_step, easiness_score)
 
-        # project features onto classifier (standard: no sz scaling)
+        # Scale / prepare sz
+        sz = self.sz * (self.ngpt_sz_init_value / self.ngpt_sz_init_scale)
+
+        # project features onto classifer
         # [b, seq_len, hidden_size] * [hidden_size, vocab_size] = [b, seq_len, vocab_size]
-        logits = cast_linear(features, self.classifier)
+        unscaled_logits = cast_linear(features, self.classifier)
+
+        # Scale the logits with sz
+        logits = sz.to(unscaled_logits.dtype) * unscaled_logits
 
         # Return Logits
         return logits, total_aux_loss, total_sparsity_loss

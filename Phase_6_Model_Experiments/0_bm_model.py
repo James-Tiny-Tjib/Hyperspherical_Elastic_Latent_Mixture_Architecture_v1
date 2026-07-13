@@ -1,10 +1,10 @@
-# %%writefile model.py
+%%writefile model.py
 
 ##################################################
 # Defines the HELM V1 architecture
-# Has a total of 32 heads, d_head = 64; only 16 will be used at a time
-# True Decoupling of d_model = d_head * n_head
-# Acheived via expansion layer
+# Inherited the PretrainedConfig and PreTrainedModel
+# Utilizes many of the concepts found in Nvidia's 2024 nGPT architecture
+# Initializes the Weights
 ##################################################
 
 import os
@@ -55,8 +55,7 @@ class HELMConfig(PretrainedConfig):
         max_position_embeddings = 4096,
         initializer_range = 0.03125,
         num_hidden_layers = 12,
-        num_attention_heads = 32,
-        d_head = 64,
+        num_attention_heads = 16,
         rope_theta = 160000,
         intermediate_size = 2816,
         norm_eps = 1e-12,
@@ -132,7 +131,6 @@ class HELMConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
-        self.d_head = d_head 
         self.rope_theta = rope_theta
         self.intermediate_size = intermediate_size
         self.norm_eps = norm_eps
@@ -562,8 +560,7 @@ class HELMSelfAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.num_attention_heads = config.num_attention_heads
         self.num_permanent_heads = config.num_permanent_heads
-        self.d_head = config.d_head if config.d_head is not None else (config.hidden_size // config.num_attention_heads)
-        self.total_head_dim = self.num_attention_heads * self.d_head   
+        self.d_head = config.hidden_size // config.num_attention_heads
         self.ngpt_sqk_init_value = config.ngpt_sqk_init_value
         self.ngpt_sqk_init_scale = config.ngpt_sqk_init_scale
         self.config = config
@@ -577,7 +574,7 @@ class HELMSelfAttention(nn.Module):
         # QKV Matrix
         self.qkv = nn.Linear(
             config.hidden_size,
-            self.total_head_dim * 3,
+            config.hidden_size * 3,
             bias = config.bias
         )
 
@@ -589,11 +586,11 @@ class HELMSelfAttention(nn.Module):
         )
 
         # SQK scalers right after RoPE
-        self.sqk = nn.Parameter(self.ngpt_sqk_init_scale*torch.ones(self.total_head_dim))  # was: self.hidden_size
+        self.sqk = nn.Parameter(self.ngpt_sqk_init_scale*torch.ones(self.hidden_size))
 
         # Output Matrix
         self.output = nn.Linear(
-            self.total_head_dim,      # was: config.hidden_size
+            config.hidden_size,
             config.hidden_size,
             bias = config.bias
         )
@@ -637,11 +634,11 @@ class HELMSelfAttention(nn.Module):
         qkv_proj = cast_linear(hidden_states, self.qkv)
 
         # Obtain Hidden Size
-        batch_size, seq_len, _ = hidden_states.size()
+        batch_size, seq_len, hidden_size = hidden_states.size()
 
         # Split Projects
         # q, k, v size(): [b, seq_len, hidden_size]
-        q, k, v = qkv_proj.split(self.total_head_dim, dim=-1)
+        q, k, v = qkv_proj.split(hidden_size, dim=-1)
 
         # Define sqk for scaling q, k, and v
         # size(): [hidden_size]

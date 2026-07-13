@@ -1,4 +1,4 @@
-# %%writefile model.py
+%%writefile model.py
 
 ##################################################
 # Defines the HELM V1 architecture
