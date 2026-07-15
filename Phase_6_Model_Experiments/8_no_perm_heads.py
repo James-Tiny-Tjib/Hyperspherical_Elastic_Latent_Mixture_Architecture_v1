@@ -3,11 +3,12 @@
 ##################################################
 # Defines the HELM V1 architecture
 # Inherited the PretrainedConfig and PreTrainedModel
-# This version does not include exclusive 
-# model_repo_id: str = "JamesResearch1216/phase06v5-no-x-atten"
+# Utilizes many of the concepts found in Nvidia's 2024 nGPT architecture
+# 2 -> 0 perm heads
+# model_repo_id: str = "JamesResearch1216/phase06v8-no-perm"
 # wandb_entity: str = "jhui16-university-of-maryland"
 # wandb_project: str = "HELM-v1-10B-Run"
-# wandb_name: str = "phase06v5"
+# wandb_name: str = "phase06v8"
 ##################################################
 
 import os
@@ -84,7 +85,7 @@ class HELMConfig(PretrainedConfig):
 
         # Router Hyperparameters
         num_router_latents = 4,
-        num_permanent_heads = 2,
+        num_permanent_heads = 0,
         selection_threshold = 0.5,
         router_init_scale = 1.0,
         use_sigmoid_scaling = False,
@@ -112,7 +113,7 @@ class HELMConfig(PretrainedConfig):
         # ngpt self attention and ffn hyperparameters
         ngpt_sqk_init_value = 1.0,
         ngpt_sqk_init_scale = 0.03125,
-        use_exclusive_attention = False,
+        use_exclusive_attention = True,
         ngpt_alpha_value_attn = 0.05,
         ngpt_alpha_scale_attn = 0.03125,
         ngpt_alpha_value_mlp = 0.05,

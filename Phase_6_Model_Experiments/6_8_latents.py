@@ -4,6 +4,10 @@
 # Defines the HELM V1 architecture
 # Inherited the PretrainedConfig and PreTrainedModel
 # 4 -> 8 latents
+# model_repo_id: str = "JamesResearch1216/phase06v6-8-router-latents"
+# wandb_entity: str = "jhui16-university-of-maryland"
+# wandb_project: str = "HELM-v1-10B-Run"
+# wandb_name: str = "phase06v6"
 ##################################################
 
 import os

@@ -14,7 +14,7 @@ def repair_environment():
         # 1. Faster Uninstallation
         print("🧹 Wiping libraries...")
         subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q",
-                        "torch", "torch_xla", "torchvision", "numpy", "tensorflow", "huggingface_hub"],
+                        "torch", "torch_xla", "torchvision", "numpy", "tensorflow", "huggingface_hub", "torchaudio"], # Added torchaudio
                        capture_output=True)
 
         # 2. Parallel/Bulk Installation
@@ -26,10 +26,11 @@ def repair_environment():
                 sys.executable, "-m", "pip", *common_args,
                 "torch==2.8.0",
                 "torchvision==0.23.0",
+                "torchaudio==2.8.0", # Added torchaudio with explicit version
                 "torch_xla[tpu]==2.8.0",
-                "numpy", "pyarrow", "fsspec",
+                "numpy", "pyarrow==16.1.0", "fsspec", # <-- Pinned pyarrow here
                 "protobuf>=5.28.0",
-                "datasets", "transformers", "huggingface_hub>=0.28.0", "wandb",
+                "datasets>=2.20.0", "transformers", "huggingface_hub>=0.28.0", "wandb", # <-- Added >=2.20.0 to datasets
                 "cloud-tpu-client", "scikit-learn", "pandas<3.0.0",
                 "-f", "https://storage.googleapis.com/libtpu-releases/index.html",
                 "--extra-index-url", "https://download.pytorch.org/whl/cpu"
@@ -39,7 +40,7 @@ def repair_environment():
             # Fallback
             cmd = [
                 sys.executable, "-m", "pip", *common_args, "-U",
-                "torch", "datasets", "pyarrow", "transformers", "huggingface_hub>=0.28.0", "fsspec", "wandb", "scipy", "numpy", "pandas<3.0.0"
+                "torch", "datasets", "pyarrow", "transformers", "huggingface_hub>=0.28.0", "fsspec", "wandb", "scipy", "numpy", "pandas<3.0.0", "torchaudio" # Added torchaudio
             ]
             subprocess.check_call(cmd)
 
@@ -52,7 +53,7 @@ def repair_environment():
         # 1. Clean Wipe
         print("🧹 Wiping conflicting libraries...")
         subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q",
-                        "torch", "torchvision", "torchaudio", "huggingface_hub"],
+                        "torch", "torchvision", "torchaudio", "huggingface_hub"], # torchaudio already there, but keeping for clarity
                        capture_output=True)
 
         # 2. Setup Arguments
@@ -64,7 +65,7 @@ def repair_environment():
             print("   ⚡ Part 1: PyTorch Core...")
             subprocess.check_call([
                 sys.executable, "-m", "pip", *common_args,
-                "torch", "torchvision", "torchaudio",
+                "torch", "torchvision", "torchaudio", # Added torchaudio here
                 "--index-url", "https://download.pytorch.org/whl/cu121"
             ])
 

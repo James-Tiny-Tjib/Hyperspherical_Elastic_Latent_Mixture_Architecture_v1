@@ -3,6 +3,10 @@
 ##################################################
 # Defines the HELM V1 architecture
 # Removes all NGPT components and replaces with standard transformer architecture
+# model_repo_id: str = "JamesResearch1216/v1-Architecture-phase06v1-standard"
+# wandb_entity: str = "jhui16-university-of-maryland"
+# wandb_project: str = "HELM-v1-10B-Run"
+# wandb_name: str = "phase06v1"
 ##################################################
 
 import os

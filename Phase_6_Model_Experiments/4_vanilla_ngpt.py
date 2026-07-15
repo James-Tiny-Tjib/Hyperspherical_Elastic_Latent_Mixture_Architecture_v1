@@ -5,6 +5,10 @@
 # Inherited the PretrainedConfig and PreTrainedModel
 # Utilizes many of the concepts found in Nvidia's 2024 nGPT architecture
 # Vanilla - Removed Router
+# model_repo_id: str = "JamesResearch1216/phase06v4-Vanilla"
+# wandb_entity: str = "jhui16-university-of-maryland"
+# wandb_project: str = "HELM-v1-10B-Run"
+# wandb_name: str = "phase06v4"
 ##################################################
 
 import os

@@ -3,7 +3,12 @@
 ##################################################
 # Defines the HELM V1 architecture
 # Inherited the PretrainedConfig and PreTrainedModel
-# 2 -> 0 perm heads
+# Utilizes many of the concepts found in Nvidia's 2024 nGPT architecture
+# 4 -> 2 latent
+# model_repo_id: str = "JamesResearch1216/phase06v9-2-latent"
+# wandb_entity: str = "jhui16-university-of-maryland"
+# wandb_project: str = "HELM-v1-10B-Run"
+# wandb_name: str = "phase06v9"
 ##################################################
 
 import os
@@ -79,7 +84,7 @@ class HELMConfig(PretrainedConfig):
         mlm_span_length = 3,
 
         # Router Hyperparameters
-        num_router_latents = 4,
+        num_router_latents = 2,
         num_permanent_heads = 0,
         selection_threshold = 0.5,
         router_init_scale = 1.0,
@@ -117,7 +122,7 @@ class HELMConfig(PretrainedConfig):
         ngpt_suv_scale = 1.0,
         ngpt_sz_init_value = 1.00,
         ngpt_sz_init_scale = 0.03125,
-
+        
         # Passing total step count for warm up step calculations:
         dataset_total_steps = 65000,
 
@@ -161,11 +166,11 @@ class HELMConfig(PretrainedConfig):
         self.use_sigmoid_scaling = use_sigmoid_scaling
         self.jitter_noise = jitter_noise
         self.router_grad_clip = router_grad_clip
-        self.dense_warmup_steps = int(dense_warmup_steps * dataset_total_steps)
+        self.dense_warmup_steps = int(dense_warmup_steps * dataset_total_steps) 
 
         # Router Sparsity Hyperparameters
         self.sparsity_lambda = sparsity_lambda
-        self.sparsity_warm_up_steps = int(sparsity_warm_up_steps * dataset_total_steps)
+        self.sparsity_warm_up_steps = int(sparsity_warm_up_steps * dataset_total_steps) 
         self.head_target_min = head_target_min
         self.head_target_center = head_target_center
         self.head_target_max = head_target_max
@@ -176,8 +181,8 @@ class HELMConfig(PretrainedConfig):
         # Router Auxiliary Hyperparameters:
         self.aux_coeff_start = aux_coeff_start
         self.aux_coeff_floor = aux_coeff_floor
-        self.aux_anneal_start = int(aux_anneal_start * dataset_total_steps)
-        self.aux_anneal_steps = int(aux_anneal_steps * dataset_total_steps)
+        self.aux_anneal_start = int(aux_anneal_start * dataset_total_steps) 
+        self.aux_anneal_steps = int(aux_anneal_steps * dataset_total_steps) 
 
         # ngpt self attention and ffn hyperparameters
         self.ngpt_sqk_init_value = ngpt_sqk_init_value

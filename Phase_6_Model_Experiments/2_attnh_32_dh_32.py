@@ -3,6 +3,11 @@
 ##################################################
 # Defines the HELM V1 architecture
 # makes 16 number_attention_heads -> 32. (dhead 64 -> 32) Uses up to all 32
+# model_repo_id: str = "JamesResearch1216/phase06v2-32-32-full"
+# wandb_entity: str = "jhui16-university-of-maryland"
+# wandb_project: str = "HELM-v1-10B-Run"
+# wandb_name: str = "phase06v2"
+# mb 8 -> 6
 ##################################################
 
 import os

@@ -4,7 +4,11 @@
 # Defines the HELM V1 architecture
 # Inherited the PretrainedConfig and PreTrainedModel
 # Utilizes many of the concepts found in Nvidia's 2024 nGPT architecture
-# Initializes the Weights
+# Original Model (NGPT, 4 latents, 2 perm heads, exclusive attention, 16 attention heads, dh = 64, dm = 1024)
+# model_repo_id: str = "JamesResearch1216/v1-Architecture-phase05v1"
+# wandb_entity: str = "jhui16-university-of-maryland"
+# wandb_project: str = "HELM-v1-10B-Run"
+# wandb_name: str = "phase05v1"
 ##################################################
 
 import os
