@@ -84,7 +84,7 @@ class HELMConfig(PretrainedConfig):
 
         # Router Hyperparameters
         num_router_latents = 4,
-        num_permanent_heads = 0,
+        num_permanent_heads = 8,
         selection_threshold = 0.5,
         router_init_scale = 1.0,
         use_sigmoid_scaling = False,
@@ -96,8 +96,8 @@ class HELMConfig(PretrainedConfig):
         # Router Sparsity Hyperparameters
         sparsity_lambda = 0.01,
         sparsity_warm_up_steps = 0.05,
-        head_target_min = 4,
-        head_target_center = 8,
+        head_target_min = 8,
+        head_target_center = 12,
         head_target_max = 16,
         easiness_cdf_breakpoints = None,
         sparsity_slack_lo = 1.0,

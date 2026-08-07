@@ -5,7 +5,14 @@
 # Has a total of 32 heads, d_head = 64; only 16 will be used at a time
 # True Decoupling of d_model = d_head * n_head
 # Acheived via expansion layer
-# 16 attention heads -> 32 attention heads
+# Target 8 16 32
+# 4 Perm heads
+# No Dead Head Penalty
+# Still Use Clamp
+# model_repo_id: str = "JamesResearch1216/phase06v12-32h-64d-16b"
+# wandb_entity: str = "jhui16-university-of-maryland"
+# wandb_project: str = "HELM-v1-10B-Run"
+# wandb_name: str = "phase06v12"
 ##################################################
 
 import os
@@ -83,7 +90,7 @@ class HELMConfig(PretrainedConfig):
 
         # Router Hyperparameters
         num_router_latents = 4,
-        num_permanent_heads = 2,
+        num_permanent_heads = 4,
         selection_threshold = 0.5,
         router_init_scale = 1.0,
         use_sigmoid_scaling = False,
@@ -95,9 +102,9 @@ class HELMConfig(PretrainedConfig):
         # Router Sparsity Hyperparameters
         sparsity_lambda = 0.01,
         sparsity_warm_up_steps = 0.05,
-        head_target_min = 4,
-        head_target_center = 8,
-        head_target_max = 16,
+        head_target_min = 8,
+        head_target_center = 16,
+        head_target_max = 32,
         easiness_cdf_breakpoints = None,
         sparsity_slack_lo = 1.0,
         sparsity_slack_hi = 2.0,
@@ -108,11 +115,11 @@ class HELMConfig(PretrainedConfig):
         aux_anneal_start = 0.08,
         aux_anneal_steps = 0.25,
 
-        # Dead-head insurance + saturation guard (per-layer, folded into sparsity_loss)
+        # # Dead-head insurance + saturation guard (per-layer, folded into sparsity_loss)
         class_score_clamp = 6.0,      # clamp pre-sigmoid logit to [-c, c] so sigmoid' never fully dies
-        dead_head_coeff = 0.01,       # strength of the min-usage floor penalty
-        dead_head_floor = 0.10,       # each head's batch-avg usage should stay >= this
-        usage_ema_decay = 0.99,       # EMA horizon for tracking chronic per-head usage
+        # dead_head_coeff = 0.01,       # strength of the min-usage floor penalty
+        # dead_head_floor = 0.10,       # each head's batch-avg usage should stay >= this
+        # usage_ema_decay = 0.99,       # EMA horizon for tracking chronic per-head usage
 
         # ngpt self attention and ffn hyperparameters
         ngpt_sqk_init_value = 1.0,
@@ -187,9 +194,9 @@ class HELMConfig(PretrainedConfig):
         self.aux_coeff_start = aux_coeff_start
         self.aux_coeff_floor = aux_coeff_floor
         self.class_score_clamp = class_score_clamp
-        self.dead_head_coeff = dead_head_coeff
-        self.dead_head_floor = dead_head_floor
-        self.usage_ema_decay = usage_ema_decay
+        # self.dead_head_coeff = dead_head_coeff
+        # self.dead_head_floor = dead_head_floor
+        # self.usage_ema_decay = usage_ema_decay
         self.aux_anneal_start = int(aux_anneal_start * dataset_total_steps) 
         self.aux_anneal_steps = int(aux_anneal_steps * dataset_total_steps) 
 
@@ -282,12 +289,12 @@ class HELMMultiViewRouter(nn.Module):
         # Persistent EMA of each elastic head's activation frequency (for dead-head detection).
         # Registered as a buffer so it survives checkpoint save/load and moves with .to(device).
         # Init at the floor so nothing is flagged "dead" before it's had a chance to be seen.
-        self.register_buffer(
-            "usage_ema",
-            torch.full((config.num_attention_heads - config.num_permanent_heads,),
-                       float(config.dead_head_floor)),
-            persistent = True
-        )
+        # self.register_buffer(
+        #     "usage_ema",
+        #     torch.full((config.num_attention_heads - config.num_permanent_heads,),
+        #                float(config.dead_head_floor)),
+        #     persistent = True
+        # )
 
     # Map BT_easiness -> Target # of heads
     # Problem: most of the BT_easiness_score are around .34 mark
@@ -482,24 +489,24 @@ class HELMMultiViewRouter(nn.Module):
             # push their PRE-sigmoid logit (class_scores) up directly -- that path is NOT saturated,
             # so the gradient actually reaches q_up_proj. Folded into sparsity_loss so the trainer
             # (which only receives aux_loss + sparsity_loss) needs no changes.
-            with torch.no_grad():
-                # per-head activation frequency this batch: [total_elastic_heads]
-                batch_usage = flat_mask.squeeze(1).mean(0).float().view(-1)
-                d = self.config.usage_ema_decay
-                self.usage_ema.mul_(d).add_(batch_usage, alpha = (1.0 - d))
+            # with torch.no_grad():
+            #     # per-head activation frequency this batch: [total_elastic_heads]
+            #     batch_usage = flat_mask.squeeze(1).mean(0).float().view(-1)
+            #     d = self.config.usage_ema_decay
+            #     self.usage_ema.mul_(d).add_(batch_usage, alpha = (1.0 - d))
 
             # How far below floor each head is chronically running (0 if healthy). [E]
-            floor = self.config.dead_head_floor
-            deficit = torch.relu(floor - self.usage_ema)                    # detached (buffer)
-            # Mean pre-sigmoid logit per head this batch. [E]
-            mean_logit = class_scores.squeeze(1).mean(0).view(-1)
-            # Penalize (deficit * -logit): minimizing this pushes dead heads' logits UP.
-            # Healthy heads have deficit 0 -> contribute nothing.
-            dead_head_raw = (deficit * (-mean_logit)).mean()
-            self.sparsity_loss = self.sparsity_loss + ramp * self.config.dead_head_coeff * dead_head_raw
+            # floor = self.config.dead_head_floor
+            # deficit = torch.relu(floor - self.usage_ema)                    # detached (buffer)
+            # # Mean pre-sigmoid logit per head this batch. [E]
+            # mean_logit = class_scores.squeeze(1).mean(0).view(-1)
+            # # Penalize (deficit * -logit): minimizing this pushes dead heads' logits UP.
+            # # Healthy heads have deficit 0 -> contribute nothing.
+            # dead_head_raw = (deficit * (-mean_logit)).mean()
+            # self.sparsity_loss = self.sparsity_loss + ramp * self.config.dead_head_coeff * dead_head_raw
 
             # telemetry hook for the writeup (min chronic usage across heads this layer)
-            self.save_min_usage = self.usage_ema.min().detach()
+            # self.save_min_usage = self.usage_ema.min().detach()
 
             # ########## SPARSITY ENDS ##########
 

@@ -1,0 +1,242 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+config.json: 100% 1.19k/1.19k [00:00<00:00, 3.81MB/s]
+tokenizer_config.json: 100% 20.8k/20.8k [00:00<00:00, 55.7MB/s]
+tokenizer.json: 100% 2.13M/2.13M [00:00<00:00, 131MB/s]
+special_tokens_map.json: 100% 694/694 [00:00<00:00, 4.06MB/s]
+Downloading checkpoint-065000.pt from JamesResearch1216/v1-Architecture-phase05v1 ...
+
+checkpoint-065000.pt: downloading bytes:   4% 114M/3.12G [00:02<00:21, 137MB/s, 8.24MB/s  ] 
+checkpoint-065000.pt: downloading bytes:   5% 143M/3.12G [00:02<00:21, 141MB/s, 11.6MB/s  ]
+checkpoint-065000.pt: downloading bytes:  23% 709M/3.12G [00:06<00:21, 112MB/s, 51.0MB/s  ]
+checkpoint-065000.pt: downloading bytes:  43% 1.33G/3.12G [00:10<00:05, 316MB/s, 81.2MB/s  ]
+checkpoint-065000.pt: reconstructing file:  20% 620M/3.12G [00:10<00:35, 69.4MB/s, 26.5MB/s  ]
+checkpoint-065000.pt: downloading bytes:  65% 2.04G/3.12G [00:11<00:02, 459MB/s,  125MB/s  ]
+checkpoint-065000.pt: downloading bytes:  72% 2.25G/3.12G [00:12<00:03, 262MB/s,  135MB/s  ]
+checkpoint-065000.pt: downloading bytes:  89% 2.78G/3.12G [00:16<00:03, 96.0MB/s,  135MB/s  ]
+checkpoint-065000.pt: downloading bytes:  91% 2.84G/3.12G [00:17<00:05, 50.3MB/s,  128MB/s  ]
+checkpoint-065000.pt: reconstructing file:  76% 2.37G/3.12G [00:19<00:04, 157MB/s,  142MB/s  ]
+checkpoint-065000.pt: downloading bytes: 100% 2.85G/2.85G [00:19<00:00, 145MB/s,  126MB/s  ] 
+checkpoint-065000.pt: reconstructing file: 100% 3.12G/3.12G [00:19<00:00, 159MB/s,  176MB/s  ]
+Loaded /root/.cache/huggingface/hub/models--JamesResearch1216--v1-Architecture-phase05v1/snapshots/a04dc17d9662a40a83e27e257ee5b43a1c0854b8/checkpoint-065000.pt onto cuda
+Router present: True
+GPU: NVIDIA A100-SXM4-40GB  capability (8, 0)
+
+######################################################################
+# Sequence length 1024
+######################################################################
+
+data/seq_1024/validation-00000.parquet: downloading bytes:  99% 42.0M/42.6M [00:07<00:00, 16.6MB/s, 3.08MB/s  ]
+data/seq_1024/validation-00000.parquet: downloading bytes: 100% 42.0M/42.0M [00:07<00:00, 5.86MB/s, 3.31MB/s  ]
+data/seq_1024/validation-00000.parquet: reconstructing file: 100% 42.6M/42.6M [00:07<00:00, 5.95MB/s, 3.65MB/s  ]
+  loaded 100 validation rows (easiness 0.000 - 0.930)
+  running evaluation ...
+  figures -> ./helm_analysis/*_seq1024.png
+  timing ...
+    bs1/dense                             32.02 ms  (+/- 0.51)
+    bs1/flex                              35.48 ms  (+/- 0.51)
+    bs1/forced_all_heads                  23.76 ms  (+/- 0.26)
+    bs4/dense                             34.20 ms  (+/- 0.19)
+    bs4/flex                             297.06 ms  (+/- 1.77)
+    bs4/forced_all_heads                  28.24 ms  (+/- 0.15)
+
+==============================================================================
+  ANALYSIS REPORT -- sequence length 1024
+==============================================================================
+
+[A] QUALITY
+  N=100  CE=1.5889  ppl=5.27  acc=0.6727  top5=0.8380  F1=0.4647
+    hard    (n= 34, ez 0.00-0.29): CE=1.6716  acc=0.6680
+    medium  (n= 33, ez 0.29-0.42): CE=1.6293  acc=0.6609
+    easy    (n= 33, ez 0.43-0.93): CE=1.4633  acc=0.6893
+
+[B] HEAD CENSUS
+  always-on=15  always-off=0  dynamic=153  (91.1% dynamic)
+  per-layer always-off: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  >> VERDICT: most heads are genuinely input-dependent.
+
+[C] DIFFICULTY RESPONSE  (model never sees easiness at inference)
+  Spearman rho=-0.9327  p=3.29e-45
+  heads used -- hard=166.26  medium=124.33  easy=47.67
+  hard-minus-easy spread = +118.60 heads
+  Kruskal-Wallis H=79.48  p=5.51e-18
+  >> VERDICT: PASS. The router infers difficulty from content alone
+     and allocates more heads to harder text. This is the core claim.
+
+[D] DEPTH PROFILE
+  ratio by layer: ['0.38', '0.52', '0.60', '0.66', '0.68', '0.75', '0.70', '0.75', '0.75', '0.73', '0.73', '0.82']
+  depth gradient rho=+0.841 (p=0.00062)  L0=0.38 -> L11=0.82
+
+[E] ROUTE STRUCTURE
+  unique full routes: 59/100 (59%)  most common route = 36% of samples
+  unique head-sets per layer: [3, 8, 13, 14, 16, 13, 17, 21, 26, 26, 27, 24]
+  mean pairwise Jaccard = 0.564
+  motifs: sizes=[15, 38, 15, 8, 19, 5]  mean easiness=['0.33', '0.22', '0.63', '0.39', '0.47', '0.40']
+  motif<->difficulty association p=6.28e-17 -> TRACKS difficulty
+
+[F] POLARIZATION  (sum-of-sigmoids vs count-above-0.5)
+  mean sigmoid=0.572  undecided(0.4-0.6)=40.1%  <0.1=2.9%  >0.9=5.0%
+  mean (hard count - soft sum) = +1.43 heads/layer
+  >> VERDICT: scores are NOT polarized. The reported head ratio
+     overstates real routing -- this is soft attenuation of most heads,
+     and the sparsity budget can be satisfied while the ratio looks high.
+
+[G] TIMING
+  bs1/dense                             32.02 ms  (+/- 0.51)
+  bs1/flex                              35.48 ms  (+/- 0.51)
+  bs1/forced_all_heads                  23.76 ms  (+/- 0.26)
+  bs4/dense                             34.20 ms  (+/- 0.19)
+  bs4/flex                             297.06 ms  (+/- 1.77)
+  bs4/forced_all_heads                  28.24 ms  (+/- 0.15)
+  routing vs all-heads @ bs1/dense            0.742x  (slower)
+  routing vs all-heads @ bs1/flex             0.670x  (slower)
+  routing vs all-heads @ bs4/dense            0.826x  (slower)
+  routing vs all-heads @ bs4/flex             0.095x  (slower)
+==============================================================================
+
+######################################################################
+# Sequence length 2048
+######################################################################
+
+data/seq_2048/validation-00001.parquet: downloading bytes:  68% 28.2M/41.2M [00:01<00:00, 27.9MB/s, 1.34MB/s  ]
+data/seq_2048/validation-00001.parquet: downloading bytes: 100% 40.9M/40.9M [00:02<00:00, 19.4MB/s, 3.87MB/s  ]
+data/seq_2048/validation-00001.parquet: reconstructing file: 100% 41.2M/41.2M [00:02<00:00, 19.5MB/s, 3.92MB/s  ]
+  loaded 100 validation rows (easiness 0.035 - 0.854)
+  running evaluation ...
+  figures -> ./helm_analysis/*_seq2048.png
+  timing ...
+    bs1/dense                             33.13 ms  (+/- 0.62)
+    bs1/flex                              36.71 ms  (+/- 0.22)
+    bs1/forced_all_heads                  24.46 ms  (+/- 0.64)
+    bs4/dense                             63.05 ms  (+/- 0.14)
+    bs4/flex                             446.89 ms  (+/- 6.26)
+    bs4/forced_all_heads                  58.38 ms  (+/- 0.04)
+
+==============================================================================
+  ANALYSIS REPORT -- sequence length 2048
+==============================================================================
+
+[A] QUALITY
+  N=100  CE=1.5466  ppl=4.95  acc=0.6841  top5=0.8405  F1=0.4637
+    hard    (n= 34, ez 0.04-0.31): CE=1.6458  acc=0.6722
+    medium  (n= 33, ez 0.32-0.41): CE=1.6007  acc=0.6756
+    easy    (n= 33, ez 0.41-0.85): CE=1.3903  acc=0.7048
+
+[B] HEAD CENSUS
+  always-on=26  always-off=0  dynamic=142  (84.5% dynamic)
+  per-layer always-off: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  >> VERDICT: most heads are genuinely input-dependent.
+
+[C] DIFFICULTY RESPONSE  (model never sees easiness at inference)
+  Spearman rho=-0.9568  p=2.35e-54
+  heads used -- hard=166.76  medium=121.39  easy=50.76
+  hard-minus-easy spread = +116.01 heads
+  Kruskal-Wallis H=86.95  p=1.32e-19
+  >> VERDICT: PASS. The router infers difficulty from content alone
+     and allocates more heads to harder text. This is the core claim.
+
+[D] DEPTH PROFILE
+  ratio by layer: ['0.31', '0.50', '0.60', '0.67', '0.70', '0.76', '0.72', '0.75', '0.80', '0.76', '0.74', '0.81']
+  depth gradient rho=+0.895 (p=8.4e-05)  L0=0.31 -> L11=0.81
+
+[E] ROUTE STRUCTURE
+  unique full routes: 62/100 (62%)  most common route = 30% of samples
+  unique head-sets per layer: [5, 9, 13, 15, 12, 14, 12, 25, 20, 26, 30, 24]
+  mean pairwise Jaccard = 0.586
+  motifs: sizes=[15, 9, 31, 17, 16, 12]  mean easiness=['0.34', '0.40', '0.24', '0.49', '0.50', '0.36']
+  motif<->difficulty association p=1.12e-17 -> TRACKS difficulty
+
+[F] POLARIZATION  (sum-of-sigmoids vs count-above-0.5)
+  mean sigmoid=0.549  undecided(0.4-0.6)=46.1%  <0.1=2.1%  >0.9=2.0%
+  mean (hard count - soft sum) = +1.77 heads/layer
+  >> VERDICT: scores are NOT polarized. The reported head ratio
+     overstates real routing -- this is soft attenuation of most heads,
+     and the sparsity budget can be satisfied while the ratio looks high.
+
+[G] TIMING
+  bs1/dense                             33.13 ms  (+/- 0.62)
+  bs1/flex                              36.71 ms  (+/- 0.22)
+  bs1/forced_all_heads                  24.46 ms  (+/- 0.64)
+  bs4/dense                             63.05 ms  (+/- 0.14)
+  bs4/flex                             446.89 ms  (+/- 6.26)
+  bs4/forced_all_heads                  58.38 ms  (+/- 0.04)
+  routing vs all-heads @ bs1/dense            0.738x  (slower)
+  routing vs all-heads @ bs1/flex             0.666x  (slower)
+  routing vs all-heads @ bs4/dense            0.926x  (slower)
+  routing vs all-heads @ bs4/flex             0.131x  (slower)
+==============================================================================
+
+######################################################################
+# Sequence length 4096
+######################################################################
+
+data/seq_4096/validation-00002.parquet: downloading bytes:  87% 35.2M/40.3M [00:02<00:00, 29.5MB/s, 2.41MB/s  ]
+data/seq_4096/validation-00002.parquet: reconstructing file:  39% 15.6M/40.3M [00:02<00:03, 7.11MB/s]
+data/seq_4096/validation-00002.parquet: downloading bytes: 100% 40.0M/40.0M [00:02<00:00, 17.3MB/s, 3.72MB/s  ]
+data/seq_4096/validation-00002.parquet: reconstructing file: 100% 40.3M/40.3M [00:02<00:00, 17.4MB/s, 3.81MB/s  ]
+  loaded 100 validation rows (easiness 0.108 - 0.626)
+  running evaluation ...
+  figures -> ./helm_analysis/*_seq4096.png
+  timing ...
+    bs1/dense                             44.32 ms  (+/- 0.11)
+    bs1/flex                              46.97 ms  (+/- 0.10)
+    bs1/forced_all_heads                  39.51 ms  (+/- 0.08)
+    bs4/dense                            143.85 ms  (+/- 0.49)
+    bs4/flex                            1236.63 ms  (+/- 3.09)
+    bs4/forced_all_heads                 138.14 ms  (+/- 0.02)
+
+==============================================================================
+  ANALYSIS REPORT -- sequence length 4096
+==============================================================================
+
+[A] QUALITY
+  N=100  CE=1.5280  ppl=4.71  acc=0.6836  top5=0.8426  F1=0.4501
+    hard    (n= 34, ez 0.11-0.33): CE=1.5810  acc=0.6772
+    medium  (n= 33, ez 0.33-0.40): CE=1.5289  acc=0.6831
+    easy    (n= 33, ez 0.40-0.63): CE=1.4724  acc=0.6908
+
+[B] HEAD CENSUS
+  always-on=44  always-off=0  dynamic=124  (73.8% dynamic)
+  per-layer always-off: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  >> VERDICT: most heads are genuinely input-dependent.
+
+[C] DIFFICULTY RESPONSE  (model never sees easiness at inference)
+  Spearman rho=-0.9578  p=7.18e-55
+  heads used -- hard=164.03  medium=116.52  easy=62.91
+  hard-minus-easy spread = +101.12 heads
+  Kruskal-Wallis H=84.76  p=3.94e-19
+  >> VERDICT: PASS. The router infers difficulty from content alone
+     and allocates more heads to harder text. This is the core claim.
+
+[D] DEPTH PROFILE
+  ratio by layer: ['0.24', '0.45', '0.62', '0.67', '0.69', '0.77', '0.72', '0.79', '0.81', '0.79', '0.84', '0.81']
+  depth gradient rho=+0.979 (p=3.1e-08)  L0=0.24 -> L11=0.81
+
+[E] ROUTE STRUCTURE
+  unique full routes: 67/100 (67%)  most common route = 24% of samples
+  unique head-sets per layer: [4, 8, 13, 15, 15, 12, 12, 17, 25, 23, 21, 26]
+  mean pairwise Jaccard = 0.635
+  motifs: sizes=[18, 24, 23, 17, 11, 7]  mean easiness=['0.40', '0.27', '0.47', '0.33', '0.37', '0.35']
+  motif<->difficulty association p=1.14e-17 -> TRACKS difficulty
+
+[F] POLARIZATION  (sum-of-sigmoids vs count-above-0.5)
+  mean sigmoid=0.533  undecided(0.4-0.6)=55.0%  <0.1=1.1%  >0.9=0.9%
+  mean (hard count - soft sum) = +2.11 heads/layer
+  >> VERDICT: scores are NOT polarized. The reported head ratio
+     overstates real routing -- this is soft attenuation of most heads,
+     and the sparsity budget can be satisfied while the ratio looks high.
+
+[G] TIMING
+  bs1/dense                             44.32 ms  (+/- 0.11)
+  bs1/flex                              46.97 ms  (+/- 0.10)
+  bs1/forced_all_heads                  39.51 ms  (+/- 0.08)
+  bs4/dense                            143.85 ms  (+/- 0.49)
+  bs4/flex                            1236.63 ms  (+/- 3.09)
+  bs4/forced_all_heads                 138.14 ms  (+/- 0.02)
+  routing vs all-heads @ bs1/dense            0.891x  (slower)
+  routing vs all-heads @ bs1/flex             0.841x  (slower)
+  routing vs all-heads @ bs4/dense            0.960x  (slower)
+  routing vs all-heads @ bs4/flex             0.112x  (slower)
+==============================================================================
+
+Wrote ./helm_analysis/results_base.json
+Send me that JSON (and the PNGs) and I'll interpret it.

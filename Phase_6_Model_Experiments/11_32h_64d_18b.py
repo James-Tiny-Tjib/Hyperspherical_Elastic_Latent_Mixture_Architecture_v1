@@ -5,7 +5,8 @@
 # Has a total of 32 heads, d_head = 64; only 16 will be used at a time
 # True Decoupling of d_model = d_head * n_head
 # Acheived via expansion layer
-# 16 attention heads -> 32 attention heads
+# Target 14 18 24
+# Dead Head Penalty
 ##################################################
 
 import os
@@ -95,9 +96,9 @@ class HELMConfig(PretrainedConfig):
         # Router Sparsity Hyperparameters
         sparsity_lambda = 0.01,
         sparsity_warm_up_steps = 0.05,
-        head_target_min = 4,
-        head_target_center = 8,
-        head_target_max = 16,
+        head_target_min = 14,
+        head_target_center = 18,
+        head_target_max = 24,
         easiness_cdf_breakpoints = None,
         sparsity_slack_lo = 1.0,
         sparsity_slack_hi = 2.0,

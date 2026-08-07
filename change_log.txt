@@ -335,12 +335,21 @@ Created this log to help me document what is happening
     Pushed to 1.5 Billion tokens
     Currently sitting at 3.2 loss
     Validation is now 0 (need investigation)
-    
 
-
-
-
-
+8/3:
+    Finished a ton of ablations
+    Our Model has no real improvements over dense counterparts (actually does slightly worse)
+    The problem is that we never gotten a real ablation that actually reflected a real MoH architecture
+        - Almost all ablations only selected a very few amount of heads
+        - Future plans (unsure if its worrth continuing), but possibly re-make the router loss functions (more reserach and actual intution is needed)
+        - The warmup needs to be studied. I wonder if training if the dense warmup prepares the model well enough to then only activate 1/4 of the heads (go back to research)
+        - target head counts + total head count mechanisms are completely cooked. I need to fix them (like is total heads include the permanent ones)?
+        - When I did my ablations adding more heads, I also moved the targets up, and obviously having more dense heads is better
+    Lost a ton of owenership with the project, and the analyzation stuff I have no knowledge about
+    I wonder if its even worth putting the dead head / 32h-64d ablations is worth adding even though the mechanism that was proposed did not do anything
+    My next research is still deeply connected to Mixtures + Routers, so I wonder if its worth fixing the balancing stuff, or should cut my losses
+    The entire trainer needs an entirely new makeover (like allocating how many devices per run), etc. I think at this point, It's best just to only use v5e-8 and nothing else.
+    Let me finish Analyzation and start the write up before I move on
 
 
 

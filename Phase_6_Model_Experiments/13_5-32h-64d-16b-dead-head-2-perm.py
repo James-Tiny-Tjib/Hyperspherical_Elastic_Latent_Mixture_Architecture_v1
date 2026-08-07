@@ -5,7 +5,14 @@
 # Has a total of 32 heads, d_head = 64; only 16 will be used at a time
 # True Decoupling of d_model = d_head * n_head
 # Acheived via expansion layer
-# 16 attention heads -> 32 attention heads
+# Target 8 16 32
+# 2 Perm heads
+# Dead Head Penalty
+# Still Use Clamp
+# model_repo_id: str = "JamesResearch1216/phase06v13-5-32h-64d-16b-dead-head"
+# wandb_entity: str = "jhui16-university-of-maryland"
+# wandb_project: str = "HELM-v1-10B-Run"
+# wandb_name: str = "phase06v13"
 ##################################################
 
 import os
@@ -95,9 +102,9 @@ class HELMConfig(PretrainedConfig):
         # Router Sparsity Hyperparameters
         sparsity_lambda = 0.01,
         sparsity_warm_up_steps = 0.05,
-        head_target_min = 4,
-        head_target_center = 8,
-        head_target_max = 16,
+        head_target_min = 8,
+        head_target_center = 16,
+        head_target_max = 32,
         easiness_cdf_breakpoints = None,
         sparsity_slack_lo = 1.0,
         sparsity_slack_hi = 2.0,

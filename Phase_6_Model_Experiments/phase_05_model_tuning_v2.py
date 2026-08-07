@@ -29,12 +29,12 @@ from huggingface_hub import hf_hub_download, create_repo, HfApi
 from huggingface_hub.utils import RepositoryNotFoundError, EntryNotFoundError
 
 
-# Disable Progress Bars
-try:
-    from huggingface_hub.utils import disable_progress_bars
-    disable_progress_bars()
-except ImportError:
-    pass
+# # Disable Progress Bars
+# try:
+#     from huggingface_hub.utils import disable_progress_bars
+#     disable_progress_bars()
+# except ImportError:
+#     pass
 
 # Ensure PJRT runtime gets selected, not XRT
 for key in ["XRT_TPU_CONFIG", "PJRT_SELECT_DEVICE", "TPU_PROCESS_ADDRESSES"]:
@@ -167,7 +167,7 @@ class HardwareConfig:
         }
     }
 
-    hardware_string: str = "v6e-1 tpu"
+    hardware_string: str = "v5e-8 tpu"
     # hardware_string: str = "t4*2 gpu"
     hf_token: str = ""
 
@@ -225,10 +225,10 @@ class MLMDataConfig:
 
 @dataclass
 class CheckpointConfig:
-    model_repo_id: str = "JamesResearch1216/phase06v7-no-perm"
+    model_repo_id: str = "JamesResearch1216/test"
     wandb_entity: str = "jhui16-university-of-maryland"
     wandb_project: str = "HELM-v1-10B-Run"
-    wandb_name: str = "phase06v7"
+    wandb_name: str = "test"
     hf_token: str = ""
     wandb_key: str = ""
     use_wandb: bool = True
@@ -289,7 +289,7 @@ class MLMDataStrategy:
         local_path = os.path.join(local_storage_dir, parquet_file_path)
         if os.path.exists(local_path):
             try:
-                parquet_metadata = pq.read_metadata(parquet_file_path)
+                parquet_metadata = pq.read_metadata(local_path)
                 num_rows = parquet_metadata.num_rows
                 return local_path, num_rows, curriculum_level
             except Exception as e:
@@ -308,7 +308,7 @@ class MLMDataStrategy:
             )
 
             # Get # of rows
-            parquet_metadata = pq.read_metadata(parquet_file_path)
+            parquet_metadata = pq.read_metadata(local_path)
             num_rows = parquet_metadata.num_rows
 
             return parquet_file_path, num_rows, curriculum_level
@@ -1154,26 +1154,52 @@ class TelemetryDriver:
 
         activation_rows, confidence_rows = {}, {}   # optional router heatmap sources
 
+        # for key, val in telemetry_dict.items():
+        #     # router heatmap sources: collect per-layer, don't log as plain histograms
+        #     m_fm = re.match(r"layer_(\d+)_flat_mask$", key)
+        #     m_ss = re.match(r"layer_(\d+)_sigmoid_scores$", key)
+        #     if m_fm:
+        #         activation_rows[int(m_fm.group(1))] = val.mean(dim=0).squeeze().numpy()
+        #         continue
+        #     if m_ss:
+        #         confidence_rows[int(m_ss.group(1))] = val.mean(dim=0).squeeze().numpy()
+        #         log_payload[self._tele_key(key) + "_hist"] = wandb.Histogram(val.numpy())
+        #         continue
+
+        #     # everything else: dispatch purely on type, so ANY architecture just works
+        #     if isinstance(val, torch.Tensor):
+        #         v = val.detach().cpu()
+        #         log_payload[self._tele_key(key)] = (wandb.Histogram(v.numpy())
+        #                                             if v.numel() > 1 else v.item())
+        #     elif isinstance(val, (int, float)):
+        #         log_payload[self._tele_key(key)] = val
+        #     # unknown types are silently skipped instead of crashing
+
         for key, val in telemetry_dict.items():
-            # router heatmap sources: collect per-layer, don't log as plain histograms
             m_fm = re.match(r"layer_(\d+)_flat_mask$", key)
             m_ss = re.match(r"layer_(\d+)_sigmoid_scores$", key)
             if m_fm:
-                activation_rows[int(m_fm.group(1))] = val.mean(dim=0).squeeze().numpy()
-                continue
-            if m_ss:
-                confidence_rows[int(m_ss.group(1))] = val.mean(dim=0).squeeze().numpy()
-                log_payload[self._tele_key(key) + "_hist"] = wandb.Histogram(val.numpy())
-                continue
+                activation_rows[int(m_fm.group(1))] = val.detach().cpu().mean(dim=0).squeeze().numpy()
+            elif m_ss:
+                confidence_rows[int(m_ss.group(1))] = val.detach().cpu().mean(dim=0).squeeze().numpy()
 
-            # everything else: dispatch purely on type, so ANY architecture just works
             if isinstance(val, torch.Tensor):
                 v = val.detach().cpu()
-                log_payload[self._tele_key(key)] = (wandb.Histogram(v.numpy())
-                                                    if v.numel() > 1 else v.item())
+                if not torch.isfinite(v).all():
+                    v = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
+                try:
+                    log_payload[self._tele_key(key)] = (wandb.Histogram(v.numpy())
+                                                        if v.numel() > 1 else v.item())
+                except Exception as e:
+                    # Degenerate tensor wandb can't auto-bin (e.g. constant/zero-variance,
+                    # or a shape numpy can't histogram). Fall back to scalar stats so the
+                    # run survives; this key just becomes less granular for this step.
+                    if self.rank == 0:
+                        print(f"⚠️ telemetry histogram failed for {key} ({e}); logging mean/std instead")
+                    log_payload[self._tele_key(key) + "_mean"] = v.mean().item()
+                    log_payload[self._tele_key(key) + "_std"] = v.std().item()
             elif isinstance(val, (int, float)):
                 log_payload[self._tele_key(key)] = val
-            # unknown types are silently skipped instead of crashing
 
         if activation_rows:
             rows = [activation_rows[i] for i in sorted(activation_rows)]
@@ -1184,107 +1210,6 @@ class TelemetryDriver:
 
         log_payload["global_tokens_processed"] = global_tokens_processed
         wandb.log(log_payload, step=global_step)
-
-
-    # # Log the Data
-    # def log_step (self, telemetry_dict, ce_loss, aux_loss, sparsity_loss, total_loss, global_step, is_train = True, global_tokens_processed = None):
-
-    #     # Don't log if rank == 0 or not using wandb
-    #     if self.rank != 0 or not self.ckpt_config.use_wandb or self.run is None:
-    #         return
-
-    #     if is_train:
-    #         log_payload = {
-    #             "train/ce_loss": ce_loss,
-    #             "train/aux_loss": aux_loss,
-    #             "train/sparsity_loss": sparsity_loss,
-    #             "train/total_loss": total_loss
-    #         }
-    #     else:
-    #         log_payload = {
-    #             "validation/ce_loss": ce_loss,
-    #             "validation/aux_loss": aux_loss,
-    #             "validation/sparsity_loss": sparsity_loss,
-    #             "validation/total_loss": total_loss
-    #         }
-
-    #     router_heatmap_data = []
-    #     sigmoid_heatmap_data = []
-
-    #     # Iterate through telemetry dict
-    #     for i in range (self.model_config.num_hidden_layers):
-
-    #         # Histograms (Full Tensors)
-    #         log_payload[f"layer_{i}/sqk_hist"] = wandb.Histogram(telemetry_dict[f"layer_{i}_sqk_hist"].numpy())
-    #         log_payload[f"layer_{i}/attn_alpha_hist"] = wandb.Histogram(telemetry_dict[f"layer_{i}_attn_alpha_hist"].numpy())
-    #         log_payload[f"layer_{i}/mlp_alpha_hist"] = wandb.Histogram(telemetry_dict[f"layer_{i}_mlp_alpha_hist"].numpy())
-    #         log_payload[f"layer_{i}/suv_hist"] = wandb.Histogram(telemetry_dict[f"layer_{i}_suv_hist"].numpy())
-    #         log_payload[f"layer_{i}/sigmoid_scores_hist"] = wandb.Histogram(telemetry_dict[f"layer_{i}_sigmoid_scores"].numpy())
-
-    #         # Attention SQK
-    #         log_payload[f"layer_{i}/sqk_mean"] = telemetry_dict[f"layer_{i}_sqk_mean"]
-    #         log_payload[f"layer_{i}/sqk_std"] = telemetry_dict[f"layer_{i}_sqk_std"]
-
-    #         # Attention Alpha Eigen Learning Rate
-    #         log_payload[f"layer_{i}/attn_alpha_mean"] = telemetry_dict[f"layer_{i}_attn_alpha_mean"]
-    #         log_payload[f"layer_{i}/attn_alpha_std"] = telemetry_dict[f"layer_{i}_attn_alpha_std"]
-
-    #         # MLP Alpha Eigen Learning Rate
-    #         log_payload[f"layer_{i}/mlp_alpha_mean"] = telemetry_dict[f"layer_{i}_mlp_alpha_mean"]
-    #         log_payload[f"layer_{i}/mlp_alpha_std"] = telemetry_dict[f"layer_{i}_mlp_alpha_std"]
-
-    #         # Router Metrics
-    #         log_payload[f"layer_{i}/elastic_active_ratio"] = telemetry_dict[f"layer_{i}_elastic_head_ratio"]
-    #         log_payload[f"layer_{i}/tau"] = telemetry_dict[f"layer_{i}_tau"]
-    #         log_payload[f"layer_{i}/l_i_weights"] = wandb.Histogram(telemetry_dict[f"layer_{i}_l_i_weights"].numpy())
-
-    #         # Average the flat_mask across the batch
-    #         # [b, num_attention_heads, 1, 1] -> [num_attention_heads]
-    #         flat_mask = telemetry_dict[f"layer_{i}_flat_mask"].mean(dim=0).squeeze().numpy()
-    #         router_heatmap_data.append(flat_mask)
-
-    #         # Average the sigmoid_scores across the batch
-    #         # [b, num_attention_heads, 1, 1] -> [num_attention_heads]
-    #         sigmoid_scores = telemetry_dict[f"layer_{i}_sigmoid_scores"].mean(dim=0).squeeze().numpy()
-    #         sigmoid_heatmap_data.append(sigmoid_scores)
-
-    #     # LM_head
-    #     log_payload["lm_head/sz_mean"] = telemetry_dict["lm_head_sz_mean"]
-    #     log_payload["lm_head/sz_std"] = telemetry_dict["lm_head_sz_std"]
-
-    #     log_payload["lm_head/sz_hist"] = wandb.Histogram(telemetry_dict["lm_head_sz_hist"].numpy())
-
-    #     # Generate the 2D Router Heatmap
-    #     heatmap_matrix = np.stack(router_heatmap_data)
-    #     fig, ax = plt.subplots(figsize=(10, 8))
-    #     cax = ax.matshow(heatmap_matrix, cmap="cool", vmin=0.0, vmax=1.0)
-    #     fig.colorbar(cax, label="Activation Frequency")
-    #     ax.set_xlabel("Elastic Head Index")
-    #     ax.set_ylabel("Layer")
-    #     ax.set_title(f"Router Head Activation Heatmap (Step {global_step})")
-    #     ax.set_yticks(range(self.model_config.num_hidden_layers))
-
-    #     log_payload["router/activation_heatmap"] = wandb.Image(fig)
-    #     plt.close(fig)
-
-    #     # Generate the 2D Sigmoid Score Heatmap
-    #     sig_matrix = np.stack(sigmoid_heatmap_data)
-    #     fig2, ax2 = plt.subplots(figsize=(10, 8))
-    #     cax2 = ax2.matshow(sig_matrix, cmap="winter", vmin=0.0, vmax=1.0) # Different colormap to distinguish
-    #     fig2.colorbar(cax2, label="Mean Sigmoid Confidence")
-    #     ax2.set_xlabel("Elastic Head Index")
-    #     ax2.set_ylabel("Layer")
-    #     ax2.set_title(f"Router Sigmoid Confidence Heatmap (Step {global_step})")
-    #     ax2.set_yticks(range(self.model_config.num_hidden_layers))
-
-    #     log_payload["router/confidence_heatmap"] = wandb.Image(fig2)
-    #     plt.close(fig2)
-
-    #     # Add Total Tokens processed
-    #     log_payload["global_tokens_processed"] = global_tokens_processed
-
-    #     # Push to W&B
-    #     wandb.log(log_payload, step=global_step)
 
 
 

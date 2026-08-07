@@ -2,10 +2,18 @@
 
 ##################################################
 # Defines the HELM V1 architecture
-# Has a total of 32 heads, d_head = 64; only 16 will be used at a time
-# True Decoupling of d_model = d_head * n_head
-# Acheived via expansion layer
-# 16 attention heads -> 32 attention heads
+# Inherited the PretrainedConfig and PreTrainedModel
+# Utilizes many of the concepts found in Nvidia's 2024 nGPT architecture
+# 4 -> 2 latents
+# (4, 8. 16) -> (8, 12, 16) head targets
+# 4 -> 8 perm heads
+# Use sigmoid scaling
+# Use Exclusive Attention
+# model_repo_id: str = "JamesResearch1216/phase06v14-final-ablation-redo"
+# wandb_entity: str = "jhui16-university-of-maryland"
+# wandb_project: str = "HELM-v1-10B-Run"
+# wandb_name: str = "phase06v14r"
+# Normalized the latent sums (@358) so that tau is less agressive (it sort of worked, but loss barely dropped)
 ##################################################
 
 import os
@@ -56,8 +64,7 @@ class HELMConfig(PretrainedConfig):
         max_position_embeddings = 4096,
         initializer_range = 0.03125,
         num_hidden_layers = 12,
-        num_attention_heads = 32,
-        d_head = 64,
+        num_attention_heads = 16,
         rope_theta = 160000,
         intermediate_size = 2816,
         norm_eps = 1e-12,
@@ -82,11 +89,11 @@ class HELMConfig(PretrainedConfig):
         mlm_span_length = 3,
 
         # Router Hyperparameters
-        num_router_latents = 4,
-        num_permanent_heads = 2,
+        num_router_latents = 2,
+        num_permanent_heads = 8,
         selection_threshold = 0.5,
         router_init_scale = 1.0,
-        use_sigmoid_scaling = False,
+        use_sigmoid_scaling = True,
         jitter_noise = 0.01,
         router_grad_clip = 0.05,
         dense_warmup_steps = 0.03,
@@ -95,8 +102,8 @@ class HELMConfig(PretrainedConfig):
         # Router Sparsity Hyperparameters
         sparsity_lambda = 0.01,
         sparsity_warm_up_steps = 0.05,
-        head_target_min = 4,
-        head_target_center = 8,
+        head_target_min = 8,
+        head_target_center = 12,
         head_target_max = 16,
         easiness_cdf_breakpoints = None,
         sparsity_slack_lo = 1.0,
@@ -107,12 +114,6 @@ class HELMConfig(PretrainedConfig):
         aux_coeff_floor = 0.002,
         aux_anneal_start = 0.08,
         aux_anneal_steps = 0.25,
-
-        # Dead-head insurance + saturation guard (per-layer, folded into sparsity_loss)
-        class_score_clamp = 6.0,      # clamp pre-sigmoid logit to [-c, c] so sigmoid' never fully dies
-        dead_head_coeff = 0.01,       # strength of the min-usage floor penalty
-        dead_head_floor = 0.10,       # each head's batch-avg usage should stay >= this
-        usage_ema_decay = 0.99,       # EMA horizon for tracking chronic per-head usage
 
         # ngpt self attention and ffn hyperparameters
         ngpt_sqk_init_value = 1.0,
@@ -139,7 +140,6 @@ class HELMConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
-        self.d_head = d_head 
         self.rope_theta = rope_theta
         self.intermediate_size = intermediate_size
         self.norm_eps = norm_eps
@@ -186,10 +186,6 @@ class HELMConfig(PretrainedConfig):
         # Router Auxiliary Hyperparameters:
         self.aux_coeff_start = aux_coeff_start
         self.aux_coeff_floor = aux_coeff_floor
-        self.class_score_clamp = class_score_clamp
-        self.dead_head_coeff = dead_head_coeff
-        self.dead_head_floor = dead_head_floor
-        self.usage_ema_decay = usage_ema_decay
         self.aux_anneal_start = int(aux_anneal_start * dataset_total_steps) 
         self.aux_anneal_steps = int(aux_anneal_steps * dataset_total_steps) 
 
@@ -279,16 +275,6 @@ class HELMMultiViewRouter(nn.Module):
             bias = config.bias
         )
 
-        # Persistent EMA of each elastic head's activation frequency (for dead-head detection).
-        # Registered as a buffer so it survives checkpoint save/load and moves with .to(device).
-        # Init at the floor so nothing is flagged "dead" before it's had a chance to be seen.
-        self.register_buffer(
-            "usage_ema",
-            torch.full((config.num_attention_heads - config.num_permanent_heads,),
-                       float(config.dead_head_floor)),
-            persistent = True
-        )
-
     # Map BT_easiness -> Target # of heads
     # Problem: most of the BT_easiness_score are around .34 mark
     # We need to now center the BT easiness around the median, where a score with 0.34 should be assigned to 8/16 heads should, not 0.5
@@ -368,6 +354,7 @@ class HELMMultiViewRouter(nn.Module):
         # Sum the Latents together
         # Size: ([b, num_router_latents, hidden_size] * broadcast [1, num_router_latents, 1]) and sum the latents = [b, 1 (size of pooled_latents when we added them together), hidden_size]
         pooled_latents = (latents * l_i_weights.view(1, -1, 1)).sum(dim=1, keepdim = True)
+        pooled_latents = justnorm(pooled_latents)
 
         # Normalize q_up_proj
         # Requires .weight since the matrix was defined before
@@ -381,12 +368,6 @@ class HELMMultiViewRouter(nn.Module):
 
         # Multiply this by Tau (router_init_scale) and ngpt scaler sqrt(hidden_size), or should we???
         class_scores = class_scores * tau
-
-        # Saturation guard: clamp the pre-sigmoid logit so sigmoid'(x) never fully hits 0.
-        # sigmoid(+/-6) ~ 0.9975 / 0.0025 -- still decisive, but a dead head can always
-        # receive gradient and climb back out instead of being permanently stuck.
-        c = self.config.class_score_clamp
-        class_scores = class_scores.clamp(-c, c)
 
         # Sigmoid Scores
         # Size: still [b, 1, total_elastic_heads], but with sigmoid scores
@@ -472,34 +453,6 @@ class HELMMultiViewRouter(nn.Module):
             # Ramp: go from 0 -> 1 starting at dense_warm_up -> sparsity_warm_up_steps + dense_warm_up
             ramp = torch.clamp((step_tensor.float() - dense_warmup_steps) / denom, 0.0, 1.0)
             self.sparsity_loss = ramp * self.config.sparsity_lambda * raw_sparsity
-
-            # ########## DEAD-HEAD INSURANCE ##########
-            # Problem CV^2-aux can't fix: a layer whose heads all sit near 0 looks "balanced"
-            # (near-zero CV^2 -> near-zero aux gradient), and sparsity's under-term can't lift it
-            # because its gradient flows through a saturated sigmoid. So heads that fall dead stay dead.
-            #
-            # Fix: track each head's activation freq via EMA; for heads chronically below a floor,
-            # push their PRE-sigmoid logit (class_scores) up directly -- that path is NOT saturated,
-            # so the gradient actually reaches q_up_proj. Folded into sparsity_loss so the trainer
-            # (which only receives aux_loss + sparsity_loss) needs no changes.
-            with torch.no_grad():
-                # per-head activation frequency this batch: [total_elastic_heads]
-                batch_usage = flat_mask.squeeze(1).mean(0).float().view(-1)
-                d = self.config.usage_ema_decay
-                self.usage_ema.mul_(d).add_(batch_usage, alpha = (1.0 - d))
-
-            # How far below floor each head is chronically running (0 if healthy). [E]
-            floor = self.config.dead_head_floor
-            deficit = torch.relu(floor - self.usage_ema)                    # detached (buffer)
-            # Mean pre-sigmoid logit per head this batch. [E]
-            mean_logit = class_scores.squeeze(1).mean(0).view(-1)
-            # Penalize (deficit * -logit): minimizing this pushes dead heads' logits UP.
-            # Healthy heads have deficit 0 -> contribute nothing.
-            dead_head_raw = (deficit * (-mean_logit)).mean()
-            self.sparsity_loss = self.sparsity_loss + ramp * self.config.dead_head_coeff * dead_head_raw
-
-            # telemetry hook for the writeup (min chronic usage across heads this layer)
-            self.save_min_usage = self.usage_ema.min().detach()
 
             # ########## SPARSITY ENDS ##########
 
@@ -617,8 +570,7 @@ class HELMSelfAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.num_attention_heads = config.num_attention_heads
         self.num_permanent_heads = config.num_permanent_heads
-        self.d_head = config.d_head if config.d_head is not None else (config.hidden_size // config.num_attention_heads)
-        self.total_head_dim = self.num_attention_heads * self.d_head   
+        self.d_head = config.hidden_size // config.num_attention_heads
         self.ngpt_sqk_init_value = config.ngpt_sqk_init_value
         self.ngpt_sqk_init_scale = config.ngpt_sqk_init_scale
         self.config = config
@@ -632,7 +584,7 @@ class HELMSelfAttention(nn.Module):
         # QKV Matrix
         self.qkv = nn.Linear(
             config.hidden_size,
-            self.total_head_dim * 3,
+            config.hidden_size * 3,
             bias = config.bias
         )
 
@@ -644,11 +596,11 @@ class HELMSelfAttention(nn.Module):
         )
 
         # SQK scalers right after RoPE
-        self.sqk = nn.Parameter(self.ngpt_sqk_init_scale*torch.ones(self.total_head_dim))  # was: self.hidden_size
+        self.sqk = nn.Parameter(self.ngpt_sqk_init_scale*torch.ones(self.hidden_size))
 
         # Output Matrix
         self.output = nn.Linear(
-            self.total_head_dim,      # was: config.hidden_size
+            config.hidden_size,
             config.hidden_size,
             bias = config.bias
         )
@@ -692,11 +644,11 @@ class HELMSelfAttention(nn.Module):
         qkv_proj = cast_linear(hidden_states, self.qkv)
 
         # Obtain Hidden Size
-        batch_size, seq_len, _ = hidden_states.size()
+        batch_size, seq_len, hidden_size = hidden_states.size()
 
         # Split Projects
         # q, k, v size(): [b, seq_len, hidden_size]
-        q, k, v = qkv_proj.split(self.total_head_dim, dim=-1)
+        q, k, v = qkv_proj.split(hidden_size, dim=-1)
 
         # Define sqk for scaling q, k, and v
         # size(): [hidden_size]
@@ -1345,3 +1297,5 @@ class HELMForMaskedLM(PreTrainedModel):
 
         # Return Logits
         return logits, total_aux_loss, total_sparsity_loss
+
+
